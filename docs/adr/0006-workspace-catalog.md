@@ -1,0 +1,3 @@
+# The phone activates only a catalogued directory
+
+The catalog is the set of directories on this PC the local agent may run in. It includes every folder the desktop IDE has opened, so those projects show on the phone without a separate list. A free-text path from the phone is still refused: a typo, or a directory the IDE has never opened, cannot become the place where shell commands run. A directory the IDE has not opened can be added on the PC. Removing an IDE folder hides it only until the client next reads the IDE's list, which puts it back. Removing any other directory hides it and keeps its sessions and open changes. A workspace with a run in progress cannot be removed.

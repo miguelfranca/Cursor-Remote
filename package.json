@@ -1,0 +1,17 @@
+{
+  "name": "cursor-remote",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "catalog": "node src/catalog-cli.js",
+    "tailnet": "node scripts/tailnet.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^1.7.0"
+  }
+}

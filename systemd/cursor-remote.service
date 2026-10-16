@@ -1,0 +1,19 @@
+# Filled in by ./systemd/install.sh from .env and this machine. Do not copy by hand.
+[Unit]
+Description=Cursor Remote client
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@ROOT@
+ExecStart="@NODE@" src/server.js
+Restart=on-failure
+RestartSec=3
+Environment="PATH=@PATH@"
+Environment="HOME=@HOME@"
+Environment="PORT=@PORT@"
+Environment="OPERATOR_LOGIN=@OPERATOR_LOGIN@"
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,3 @@
+# One event stream, requests for actions
+
+Each open client subscribes to one server-sent event stream of the session: transcript text as it is written, pending commands, agent questions, plans, changes, and stop. Allow, reject, prompt, follow-up, accept, undo, and stop are ordinary requests. The PC applies each request once, then the stream tells every client what happened. The phone and the laptop are the same page, so there is one client and one vocabulary. A WebSocket would carry actions and updates on one socket; the actions are rare, and a request is what makes "first answer wins" a single decision on the PC. Tailscale Serve already proxies the HTTPS stream.
