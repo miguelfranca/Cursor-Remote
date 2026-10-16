@@ -108,11 +108,16 @@ Send a message from the phone. The agent on the PC answers. The PC has to be on.
 
 ### Debug the client
 
-See whether the client is running, restart it, stop it, or follow its log:
+Restart the client from the project folder:
+
+```bash
+npm run restart
+```
+
+See whether it is running, stop it, or follow its log:
 
 ```bash
 systemctl --user status cursor-remote
-systemctl --user restart cursor-remote
 systemctl --user stop cursor-remote
 journalctl --user -u cursor-remote -f
 ```
