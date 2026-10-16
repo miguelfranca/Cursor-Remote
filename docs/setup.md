@@ -48,8 +48,6 @@ sudo tailscale up
 
 The command prints a login URL. Open it, create a Tailscale account or sign in, and approve this PC.
 
-If it asks about Funnel, leave it off. Funnel would put the page on the public internet. This page stays on your Tailscale account.
-
 ## 4. Sign in the Cursor agent
 
 ```bash
@@ -77,6 +75,8 @@ This reads the Tailscale login from this PC and saves it in `.env` in the projec
 The status should say `active (running)`.
 
 ## 6. Turn on the private address
+
+If the commands below ask about Funnel, leave it off. Funnel would put the page on the public internet. This page stays on your Tailscale account.
 
 ```bash
 sudo tailscale serve --bg 3000
@@ -106,6 +106,8 @@ Send a message from the phone. The agent on the PC answers. The PC has to be on.
 
 ## When you need it again
 
+### Debug the client
+
 See whether the client is running, restart it, stop it, or follow its log:
 
 ```bash
@@ -117,19 +119,42 @@ journalctl --user -u cursor-remote -f
 
 To run it in the foreground in this terminal, stop the service, then from the project folder run `npm start`.
 
-List or remove a folder:
+`npm test` checks the project.
+
+### Change folders
+
+List, add, or remove a folder:
 
 ```bash
 npm run catalog -- list
+npm run catalog -- add /absolute/path/to/project
 npm run catalog -- remove /absolute/path/to/project
 ```
 
 A folder you have opened in Cursor shows up again after a remove. A folder whose agent is still replying is put back.
 
+### Rename the machine in Tailscale
+
+Changing this PC's name in the [Tailscale admin console](https://login.tailscale.com/admin/machines) updates its MagicDNS name. Serve keeps the previous address and the certificate for that name. Publish Serve again so the new bookmark opens:
+
+```bash
+sudo tailscale serve off
+sudo tailscale serve --bg 3000
+npm run tailnet
+```
+
+Open the bookmark `npm run tailnet` prints. The certificate for the new name usually appears within a minute.
+
+### Turn the private address off
+
+```bash
+tailscale serve off
+```
+
+### Change who can open the page
+
 `tailscale status` shortens your email. The page expects the full operator login from `npm run tailnet`. To change it, edit `OPERATOR_LOGIN` in `.env`, then run `./systemd/install.sh` again.
 
-To use another port, edit `PORT` in `.env`, run `./systemd/install.sh` again, and run `sudo tailscale serve --bg` with the new port.
+### Change the port
 
-Turn the private address off with `tailscale serve off`.
-
-`npm test` checks the project.
+Edit `PORT` in `.env`, run `./systemd/install.sh` again, and run `sudo tailscale serve --bg` with the new port.
