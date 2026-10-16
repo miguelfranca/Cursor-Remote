@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import http from "node:http";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,6 +20,11 @@ try {
   process.exit(1);
 }
 const hub = createHub({ dataDir: join(root, "..", "data") });
+const webAppFiles = new Map([
+  readWebAppFile("/manifest.webmanifest", "application/manifest+json", "manifest.webmanifest"),
+  readWebAppFile("/icon-192.png", "image/png", "icon-192.png"),
+  readWebAppFile("/icon-512.png", "image/png", "icon-512.png"),
+]);
 
 setInterval(() => hub.guardCatalog(), 1000);
 
@@ -46,6 +52,15 @@ async function route(request, response) {
   if (request.method === "GET" && url.pathname === "/") {
     response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
     response.end(clientPage());
+    return;
+  }
+  const webAppFile = webAppFiles.get(url.pathname);
+  if (request.method === "GET" && webAppFile) {
+    response.writeHead(200, {
+      "content-type": webAppFile.contentType,
+      "cache-control": "no-store",
+    });
+    response.end(webAppFile.body);
     return;
   }
   if (request.method === "GET" && url.pathname === "/events") {
@@ -118,6 +133,10 @@ function sendJson(response, status, value) {
   if (response.headersSent) return;
   response.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" });
   response.end(JSON.stringify(value));
+}
+
+function readWebAppFile(pathname, contentType, filename) {
+  return [pathname, { contentType, body: readFileSync(join(projectRoot, "public", filename)) }];
 }
 
 function headerValue(value) {
