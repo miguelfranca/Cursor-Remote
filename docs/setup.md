@@ -104,6 +104,16 @@ npm run catalog -- add /absolute/path/to/project
 
 Send a message from the phone. The agent on the PC answers. The PC has to be on.
 
+## After you change the page
+
+The running client keeps the copy of the code it loaded when it started. An edit to the page, including `src/page.js`, stays invisible until you restart:
+
+```bash
+systemctl --user restart cursor-remote
+```
+
+Then reload the page in the browser. If you started the client with `npm start` instead, stop that process and run `npm start` again.
+
 ## When you need it again
 
 See whether the client is running, restart it, stop it, or follow its log:
