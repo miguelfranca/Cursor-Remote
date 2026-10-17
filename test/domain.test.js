@@ -185,6 +185,16 @@ test("baseline prefers tool prior when disk already has the write", () => {
     content: [{ type: "diff", path: file, oldText: before, newText: after }],
   }, file);
   assert.equal(fromDiff, before);
+  const newFileFromDiffString = priorFromTool({
+    kind: "edit",
+    content: [{ type: "diff", path: file, oldText: "-- /dev/null", newText: `++ b/file.json\n${after}` }],
+  }, file);
+  assert.equal(newFileFromDiffString, null);
+  const excerptFromDiffString = priorFromTool({
+    kind: "edit",
+    content: [{ type: "diff", path: file, oldText: '-- a/file.json\n  "patterns": ["for each eligible friend you refer"]', newText: '++ b/file.json\n  "patterns": ["for each ... refer"]' }],
+  }, file);
+  assert.equal(excerptFromDiffString, undefined);
   const fromCursor = priorFromTool({
     kind: "edit",
     rawOutput: {

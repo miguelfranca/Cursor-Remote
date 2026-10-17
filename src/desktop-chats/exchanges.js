@@ -15,7 +15,7 @@ export function pendingExchanges(transcript, writtenUpTo, lastIsRunning) {
 }
 
 export function hasUnwrittenMessages(transcript, writtenUpTo) {
-  return transcript.slice(writtenUpTo).some((message) => message.role === "user" || message.role === "assistant");
+  return transcript.slice(writtenUpTo).some((message) => message.role === "user");
 }
 
 export function linkedTranscript(chatMessages, session) {

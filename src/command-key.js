@@ -1,5 +1,8 @@
 import { currentText } from "./changes.js";
 
+// Without full file contents the agent rebuilds oldText from a unified diff: hunks become excerpts and "--- /dev/null" leaks in as "-- /dev/null".
+const NEW_FILE_HEADER = /^-- \/dev\/null(\n|$)/;
+
 export function commandKey(tool) {
   const name = String(tool.name || "");
   const title = String(tool.title || "");
@@ -37,12 +40,13 @@ export function pathsFromTool(tool) {
 
 /** Pre-edit file text from the tool payload, when disk may already have the write. */
 export function priorFromTool(tool, file) {
-  for (const item of tool.content || []) {
-    if (item?.type !== "diff" || item.path !== file) continue;
-    if ("oldText" in item) return item.oldText ?? null;
-  }
   const before = findBeforeFullFile(tool, file);
   if (before !== undefined) return before;
+  for (const item of tool.content || []) {
+    if (item?.type !== "diff" || item.path !== file || !("oldText" in item)) continue;
+    if (item.oldText == null || NEW_FILE_HEADER.test(item.oldText)) return null;
+    if (item.newText === currentText(file)) return item.oldText;
+  }
   const raw = tool.rawInput && typeof tool.rawInput === "object" ? tool.rawInput : {};
   const rawPath = raw.path || raw.file_path || raw.filePath || raw.target_file;
   if (rawPath === file && typeof raw.old_string === "string" && typeof raw.new_string === "string") {

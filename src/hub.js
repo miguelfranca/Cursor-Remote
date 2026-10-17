@@ -22,8 +22,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
   const stateFile = join(dataDir, "state.json");
   const state = readJson(stateFile, { activeWorkspace: null, workspaces: {} });
   const listeners = new Set();
-  let running = false;
-  let loading = false;
+  let runningSession = null;
   let activity = null;
   let error = "";
   let connection = null;
@@ -70,7 +69,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
   }
 
   function requireIdle() {
-    if (running) throw new Error("A run is in progress.");
+    if (runningSession) throw new Error("A run is in progress.");
   }
 
   function guardCatalog() {
@@ -86,7 +85,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     }
     if (added) publish();
     if (!state.activeWorkspace || catalog.has(state.activeWorkspace)) return;
-    if (running) {
+    if (runningSession) {
       catalog.restore(state.activeWorkspace);
       error = "That workspace has a run in progress.";
     } else {
@@ -122,7 +121,6 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
   }
 
   function writeDesktopChats() {
-    const runningSession = running ? activeSession() : null;
     const rowsToRemove = state.desktopRowsToRemove ?? [];
     let changed = false;
     for (const [directory, workspace] of Object.entries(state.workspaces)) {
@@ -195,9 +193,8 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
       await send(text, skillNames, false, null, files);
     },
     stop() {
-      const session = activeSession();
-      if (!running || !session || !connection) return;
-      connection.cancel({ sessionId: session.id }).catch(() => {});
+      if (!runningSession || !connection) return;
+      connection.cancel({ sessionId: runningSession.id }).catch(() => {});
       finishWait({ outcome: { outcome: "cancelled" } });
     },
     answerPermission(decision) {
@@ -291,14 +288,13 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
       workspace.activeSessionId = session.id;
       saveNow();
       publish();
+      if (liveSessions.has(session.id)) return;
       await ensureAgent();
-      loading = true;
       try {
         await openLoaded(session, state.activeWorkspace);
         session.mode = session.modes?.currentModeId || session.mode;
         session.model = currentModelName(session.configOptions) || session.model;
       } finally {
-        loading = false;
         saveNow();
         publish();
       }
@@ -330,8 +326,8 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     const transcript = open.chat ? open.chat.messages : session ? desktop.transcript(session) : [];
     return {
       error,
-      running,
-      activity: running ? (waiter ? null : activity || "Working") : null,
+      running: Boolean(runningSession),
+      activity: runningSession ? (waiter ? null : activity || "Working") : null,
       catalog: catalog.list(),
       activeWorkspace: directory,
       activeSession: open.session
@@ -453,7 +449,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     const blocks = promptBlocks(textPrompt, attached);
     append(session, "user", displayText(message, attached));
     session.updatedAt = Date.now();
-    running = true;
+    runningSession = session;
     activity = "Thinking";
     error = "";
     saveNow();
@@ -466,7 +462,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
       sessionId: session.id,
       prompt: blocks,
     }).catch(showError).finally(() => {
-      running = false;
+      runningSession = null;
       activity = null;
       finishWait({ outcome: { outcome: "cancelled" } });
       saveNow();
@@ -474,19 +470,14 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
   }
 
   async function openLoaded(session, directory) {
-    loading = true;
-    try {
-      const loaded = await connection.loadSession({
-        sessionId: session.id,
-        cwd: directory,
-        mcpServers: [],
-      });
-      session.modes = loaded.modes ?? session.modes;
-      session.configOptions = loaded.configOptions ?? session.configOptions;
-      liveSessions.add(session.id);
-    } finally {
-      loading = false;
-    }
+    const loaded = await connection.loadSession({
+      sessionId: session.id,
+      cwd: directory,
+      mcpServers: [],
+    });
+    session.modes = loaded.modes ?? session.modes;
+    session.configOptions = loaded.configOptions ?? session.configOptions;
+    liveSessions.add(session.id);
   }
 
   async function ensureAgent() {
@@ -529,7 +520,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     agentProcess.on("exit", () => {
       connection = null;
       starting = null;
-      running = false;
+      runningSession = null;
       activity = null;
       liveSessions.clear();
       finishWait({ outcome: { outcome: "cancelled" } });
@@ -568,23 +559,22 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     const session = findSession(params.sessionId);
     if (!session) return;
     const update = params.update;
-    if (update.sessionUpdate === "agent_message_chunk" && !loading) {
+    const answering = session === runningSession;
+    if (update.sessionUpdate === "agent_message_chunk" && answering) {
       const text = update.content?.type === "text" ? update.content.text : "";
       if (text) {
         append(session, "assistant", text);
-        if (running) activity = "Writing";
+        activity = "Writing";
       }
     }
-    if (update.sessionUpdate === "agent_thought_chunk" && running) {
+    if (update.sessionUpdate === "agent_thought_chunk" && answering) {
       activity = "Thinking";
     }
     if (update.sessionUpdate === "user_message_chunk") return;
-    if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
-      if (!loading) trackMutations(session, update);
-      if (running) {
-        const done = update.status === "completed" || update.status === "failed" || update.status === "cancelled";
-        activity = done ? "Thinking" : activityLabel(update);
-      }
+    if ((update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") && answering) {
+      trackMutations(session, update);
+      const done = update.status === "completed" || update.status === "failed" || update.status === "cancelled";
+      activity = done ? "Thinking" : activityLabel(update);
     }
     if (update.sessionUpdate === "current_mode_update" && update.modeId) {
       session.mode = String(update.modeId);
