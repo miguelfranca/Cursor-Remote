@@ -357,6 +357,7 @@ export function clientPage() {
       border-color: #f4f4f4;
     }
     .empty, .hint { color: var(--muted); }
+    .desktop-note { margin: 0.25rem 0 0; font-size: 0.85rem; }
     .workspace-chip {
       margin: 0 0 0.35rem;
       color: var(--muted);
@@ -1113,7 +1114,12 @@ function browserClient() {
           <span class="activity-dots">${esc(next.activity)}</span>
         </div>`
       : "";
-    $("transcript").innerHTML = transcript + activity;
+    const desktopNote = !composingNew && next.desktopStatus
+      ? `<p class="hint desktop-note">${esc(next.desktopStatus.state === "refused"
+        ? `Not added to the desktop chat: ${next.desktopStatus.reason}`
+        : "Waiting for Cursor on the PC to close before adding this to the desktop chat.")}</p>`
+      : "";
+    $("transcript").innerHTML = transcript + activity + desktopNote;
 
     $("mode").innerHTML = next.modes.map((mode) =>
       `<option ${mode === next.mode ? "selected" : ""}>${esc(mode)}</option>`

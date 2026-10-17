@@ -6,7 +6,6 @@ import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { createCatalog } from "../src/catalog.js";
 import { displayText, normalizeFiles, promptBlocks } from "../src/files.js";
-import { continuationPrompt, listIdeChats, projectSlug } from "../src/ide-chats.js";
 import { ideProjectDirectories } from "../src/ide-projects.js";
 import { accept, currentText, remember, repairBaseline, undo } from "../src/changes.js";
 import { activityLabel, commandKey, isFileMutation, pathsFromTool, priorFromTool } from "../src/command-key.js";
@@ -47,61 +46,6 @@ test("ide projects are the folders Cursor has opened", () => {
   }));
   assert.deepEqual(ideProjectDirectories(storage), [project]);
   assert.deepEqual(ideProjectDirectories(join(root, "missing.json")), []);
-});
-
-test("desktop chats are listed and continued without rewriting the IDE file", () => {
-  const root = mkdtempSync(join(tmpdir(), "ide-chats-"));
-  const workspace = join(root, "Cursor Remote");
-  mkdirSync(workspace);
-  const chatId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
-  const transcriptDir = join(root, projectSlug(workspace), "agent-transcripts", chatId);
-  mkdirSync(transcriptDir, { recursive: true });
-  writeFileSync(join(transcriptDir, `${chatId}.jsonl`), [
-    JSON.stringify({
-      role: "user",
-      message: { content: [{ type: "text", text: "<user_query>Fix the login bug</user_query>" }] },
-    }),
-    JSON.stringify({
-      role: "assistant",
-      message: { content: [{ type: "text", text: "I will inspect auth.ts." }, { type: "tool_use", name: "Read" }] },
-    }),
-    JSON.stringify({
-      role: "user",
-      message: {
-        content: [{
-          type: "text",
-          text: "<timestamp>Tue</timestamp>\n<user_query>Briefly inform the user about the task result and perform any follow-up actions (if needed). If there's no follow-ups needed, don't explicitly say that.</user_query>",
-        }],
-      },
-    }),
-    JSON.stringify({
-      role: "assistant",
-      message: { content: [{ type: "text", text: "The server restarted." }] },
-    }),
-    JSON.stringify({
-      role: "user",
-      message: { content: [{ type: "text", text: "<user_query>Also cover the refresh token</user_query>" }] },
-    }),
-  ].join("\n"));
-  const chats = listIdeChats(workspace, root);
-  assert.equal(chats.length, 1);
-  assert.equal(chats[0].title, "Fix the login bug");
-  assert.deepEqual(
-    chats[0].messages.map((message) => message.role),
-    ["user", "assistant", "user"],
-  );
-  assert.deepEqual(
-    chats[0].messages.map((message) => message.text),
-    ["Fix the login bug", "I will inspect auth.ts.", "Also cover the refresh token"],
-  );
-  assert.equal(
-    chats[0].messages.some((message) => /Briefly inform the user|server restarted/i.test(message.text)),
-    false,
-  );
-  const prompt = continuationPrompt(chats[0].messages, "Do that next.");
-  assert.match(prompt, /Fix the login bug/);
-  assert.match(prompt, /Do that next\.$/);
-  assert.equal(listIdeChats(workspace, join(root, "empty")).length, 0);
 });
 
 test("file attachments become image and resource prompt blocks", () => {

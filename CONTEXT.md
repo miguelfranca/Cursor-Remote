@@ -17,7 +17,7 @@ One conversation with a local agent on the client.
 _Avoid_: chat tab, thread, desktop chat
 
 **Desktop chat**:
-A conversation the desktop IDE wrote for a workspace. The client lists it with that workspace's sessions.
+A conversation in the desktop IDE's chat list for a workspace. A chat started with the `agent` command is not a desktop chat.
 _Avoid_: IDE transcript, composer, session
 
 **Workspace**:
@@ -124,7 +124,13 @@ _Avoid_: engine, LLM
 
 - A **Desktop IDE** may be open while a **Local agent** is running. They do not share a **Session**.
 - A **Desktop chat** belongs to one **Workspace**. The **Client** lists it with that workspace's **Sessions**. It does not become the active conversation until the operator opens it from that list.
-- Continuing a **Desktop chat** on the **Client** starts a **Session** that already knows that conversation. The **Desktop chat** itself does not receive the **Client**'s messages.
+- Continuing a **Desktop chat** on the **Client** starts a **Session** that already knows that conversation. A **Desktop chat** receives that **Session**'s messages only while the **Desktop IDE** is not running. The **Client** does this on its own. The **Client** does not close the **Desktop IDE**.
+- Every **Session** is written into a **Desktop chat**. One that continued a **Desktop chat** adds its messages at the end of that chat, after whatever the **Desktop IDE** saved. One that started on the **Client** becomes a new **Desktop chat**.
+- What a **Desktop chat** receives is the text of each **Prompt** or **Follow-up** and its reply, with **File attachments** shown by name. **Changes**, **Pending commands**, **Agent questions**, and **Plans** are not written.
+- Only a finished exchange is written. A **Run** in progress is written after it ends or is stopped, if the **Desktop IDE** is still not running.
+- If a **Desktop chat** is not in a form the **Client** recognises, the write is refused. The **Session**'s messages stay waiting, and the **Client** shows why.
+- A **Session** with messages not yet written shows that it is waiting for the **Desktop IDE** to close. A refused write shows the reason. A fully written **Session** shows nothing extra.
+- A **Session** linked to a **Desktop chat** shows that chat, then the **Session**'s messages that are not written into it yet. Its own messages always show as they are in its **Transcript**, including where **Changes** happened, even after they are written.
 - Exactly one **Workspace** is active at a time.
 - A **Workspace** is a directory in the **Catalog**. The client cannot activate a directory outside the catalog.
 - The **Catalog** lists every folder the **Desktop IDE** has opened, and any directory added on this PC. The client cannot activate a directory outside the catalog. A folder opened in the **Desktop IDE** is listed again if it was removed.

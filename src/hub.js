@@ -5,7 +5,7 @@ import { join } from "node:path";
 import * as acp from "@agentclientprotocol/sdk";
 import { readJson, writeJson } from "./json-file.js";
 import { createCatalog } from "./catalog.js";
-import { continuationPrompt, listIdeChats } from "./ide-chats.js";
+import { continuationPrompt, createDesktopChats } from "./desktop-chats/index.js";
 import { ideProjectDirectories } from "./ide-projects.js";
 import { accept, currentText, remember, repairBaseline, undo } from "./changes.js";
 import { activityLabel, commandKey, isFileMutation, mutationAction, pathsFromTool, priorFromTool } from "./command-key.js";
@@ -18,6 +18,7 @@ const MODES = ["agent", "plan", "ask"];
 export function createHub({ dataDir, agentBin, ideStorage }) {
   const catalog = createCatalog(join(dataDir, "catalog.json"));
   const storageFile = ideStorage ?? join(homedir(), ".config/Cursor/User/globalStorage/storage.json");
+  const desktop = createDesktopChats({ storeFile: join(homedir(), ".config/Cursor/User/globalStorage/state.vscdb") });
   const stateFile = join(dataDir, "state.json");
   const state = readJson(stateFile, { activeWorkspace: null, workspaces: {} });
   const listeners = new Set();
@@ -95,6 +96,20 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     publish();
   }
 
+  function writeDesktopChats() {
+    if (desktop.ideRunning()) return;
+    const runningSession = running ? activeSession() : null;
+    let changed = false;
+    for (const [directory, workspace] of Object.entries(state.workspaces)) {
+      for (const session of Object.values(workspace.sessions)) {
+        if (desktop.write(directory, session, session === runningSession)) changed = true;
+      }
+    }
+    if (!changed) return;
+    saveNow();
+    publish();
+  }
+
   guardCatalog();
 
   return {
@@ -105,6 +120,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
       return () => listeners.delete(listener);
     },
     guardCatalog,
+    writeDesktopChats,
     selectWorkspace(directory) {
       requireIdle();
       if (!catalog.has(directory)) throw new Error("That directory is not in the catalog.");
@@ -207,7 +223,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
       if (!workspace) throw new Error("Choose a workspace first.");
       if (id.startsWith("ide:")) {
         const chatId = id.slice(4);
-        const chat = listIdeChats(state.activeWorkspace).find((item) => item.id === chatId);
+        const chat = desktop.list(state.activeWorkspace).find((item) => item.id === chatId);
         if (!chat) throw new Error("That chat is not in this workspace.");
         const linked = Object.values(workspace.sessions).find((session) => session.ideChatId === chatId);
         if (!linked) {
@@ -263,11 +279,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     const session = open.session ?? null;
     if (session) ensureChangeMarks(session);
     const skills = listSkills(directory);
-    const transcript = open.chat
-      ? open.chat.messages
-      : session
-        ? [...ideMessages(directory, session.ideChatId), ...session.transcript]
-        : [];
+    const transcript = open.chat ? open.chat.messages : session ? desktop.transcript(session) : [];
     return {
       error,
       running,
@@ -281,6 +293,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
           : null,
       sessions: workspace && directory ? sessionList(workspace, directory) : [],
       transcript,
+      desktopStatus: session ? desktop.status(session) : null,
       mode: session?.mode ?? workspace?.preferredMode ?? "agent",
       modes: MODES,
       model: session?.model ?? "Auto",
@@ -299,7 +312,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     const linked = new Set(
       Object.values(workspace.sessions).map((session) => session.ideChatId).filter(Boolean),
     );
-    const ide = listIdeChats(directory)
+    const ide = desktop.list(directory)
       .filter((chat) => !linked.has(chat.id))
       .map((chat) => ({ id: `ide:${chat.id}`, title: chat.title, updatedAt: chat.updatedAt }));
     const own = Object.values(workspace.sessions).map((session) => ({
@@ -316,16 +329,12 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     const session = workspace.activeSessionId ? workspace.sessions[workspace.activeSessionId] : null;
     if (session) return { session };
     if (!workspace.activeIdeChatId) return {};
-    const chat = listIdeChats(directory).find((item) => item.id === workspace.activeIdeChatId);
-    if (!chat) return {};
-    const linked = Object.values(workspace.sessions).find((item) => item.ideChatId === chat.id);
+    const linked = Object.values(workspace.sessions).find((item) => item.ideChatId === workspace.activeIdeChatId);
     if (linked) return { session: linked };
-    return { chat };
-  }
-
-  function ideMessages(directory, chatId) {
-    if (!directory || !chatId) return [];
-    return listIdeChats(directory).find((chat) => chat.id === chatId)?.messages ?? [];
+    const chat = desktop.list(directory).some((item) => item.id === workspace.activeIdeChatId)
+      ? desktop.read(workspace.activeIdeChatId)
+      : null;
+    return chat ? { chat } : {};
   }
 
   function changeViews(session) {
