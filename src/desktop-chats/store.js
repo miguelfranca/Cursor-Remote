@@ -1,11 +1,13 @@
 import { createHash } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
+import { pathToFileURL } from "node:url";
 import { readFields } from "./protobuf.js";
 
 export const USER_BUBBLE = 1;
 export const ASSISTANT_BUBBLE = 2;
 const BACKGROUND_TASK_COMPLETION = 3;
+const FILE_TOOL_ACTIONS = { editToolCall: "edit", deleteToolCall: "delete" };
 
 export function openStore(storeFile, { readOnly }) {
   if (!existsSync(storeFile)) return null;
@@ -71,16 +73,38 @@ export function isTypedUserMessage(bubble) {
   return bubble?.type === USER_BUBBLE && !bubble.isSimulatedMsg;
 }
 
-export function readChatMessages(database, chatId) {
+function fileToolAction(header) {
+  if (!header.grouping?.toolDisplayPath) return null;
+  return FILE_TOOL_ACTIONS[header.grouping.toolCallCase] ?? null;
+}
+
+export function readChat(database, chatId) {
   const record = readRecord(database, chatId);
   if (!Array.isArray(record?.fullConversationHeadersOnly)) return null;
-  const wanted = record.fullConversationHeadersOnly.filter((header) =>
+  const headers = record.fullConversationHeadersOnly;
+  const createdFiles = new Set(Object.entries(record.originalFileStates ?? {})
+    .filter(([, state]) => state?.isNewlyCreated)
+    .map(([uri]) => uri));
+  const wanted = headers.filter((header) =>
     header.type === USER_BUBBLE || (header.type === ASSISTANT_BUBBLE && !header.grouping?.capabilityType),
   );
   const bubbles = readBubbles(database, chatId, wanted.map((header) => header.bubbleId));
   const messages = [];
+  const editTimes = {};
+  const markedPaths = new Set();
   let answeringBackgroundTask = false;
-  for (const { bubbleId } of wanted) {
+  for (const header of headers) {
+    const { bubbleId } = header;
+    const toolAction = fileToolAction(header);
+    if (toolAction) {
+      const path = header.grouping.toolDisplayPath;
+      editTimes[header.grouping.toolCallId] = Date.parse(header.createdAt) || 0;
+      if (markedPaths.has(path)) continue;
+      markedPaths.add(path);
+      const action = toolAction === "edit" && createdFiles.has(pathToFileURL(path).href) ? "create" : toolAction;
+      messages.push({ bubbleId, role: "change", path, action });
+      continue;
+    }
     const bubble = bubbles.get(bubbleId);
     if (bubble?.type === USER_BUBBLE) {
       answeringBackgroundTask = isBackgroundTaskCompletion(bubble);
@@ -89,7 +113,34 @@ export function readChatMessages(database, chatId) {
       messages.push({ bubbleId, role: "assistant", text: bubble.text });
     }
   }
-  return messages;
+  return { messages, editTimes, createdFiles };
+}
+
+export function pendingRowKey(workspaceId, diffId) {
+  return `inlineDiff:${workspaceId}:${diffId}`;
+}
+
+export function listPendingRows(database, workspaceId) {
+  const prefix = pendingRowKey(workspaceId, "");
+  return database.prepare("select key, value from cursorDiskKV where key >= ? and key < ?")
+    .all(prefix, `${prefix.slice(0, -1)};`)
+    .flatMap((row) => {
+      const diff = parseJson(row.value);
+      if (!diff?.diffId || !diff.uri?.fsPath || !Array.isArray(diff.originalTextLines)) return [];
+      return [{
+        rowKey: row.key,
+        diffId: diff.diffId,
+        path: diff.uri.fsPath,
+        originalLines: diff.originalTextLines,
+        chatId: diff.composerMetadata?.composerId ?? null,
+        toolCallId: diff.composerMetadata?.toolCallId ?? null,
+      }];
+    });
+}
+
+export function deleteValues(database, keys) {
+  const statement = database.prepare("delete from cursorDiskKV where key = ?");
+  for (const key of keys) statement.run(key);
 }
 
 export function putBlob(database, bytes) {

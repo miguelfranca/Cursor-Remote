@@ -1,8 +1,9 @@
 const contextLimit = 100000;
 
 export function continuationPrompt(messages, text) {
-  if (!messages?.length) return text;
-  return `Continue this conversation from where it left off.\n\n${recentContext(messages)}\n\nUser:\n${text}`;
+  const spoken = (messages ?? []).filter((message) => message.role === "user" || message.role === "assistant");
+  if (!spoken.length) return text;
+  return `Continue this conversation from where it left off.\n\n${recentContext(spoken)}\n\nUser:\n${text}`;
 }
 
 function recentContext(messages) {

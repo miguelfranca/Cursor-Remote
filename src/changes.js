@@ -5,7 +5,7 @@ import { dirname } from "node:path";
 export function remember(changes, file, prior) {
   if (Object.hasOwn(changes, file)) return false;
   const content = prior !== undefined ? prior : currentText(file);
-  changes[file] = { existed: content !== null, content };
+  changes[file] = { existed: content !== null, content, touchedAt: Date.now() };
   return true;
 }
 
@@ -16,25 +16,17 @@ export function repairBaseline(changes, file, prior) {
   const disk = currentText(file);
   if (baseline.content !== disk) return false;
   if (prior === disk) return false;
-  changes[file] = { existed: prior !== null, content: prior };
+  changes[file] = { ...baseline, existed: prior !== null, content: prior };
   return true;
 }
 
-export function undo(changes, file) {
-  const baseline = changes[file];
-  if (!baseline) throw new Error("That change is not open.");
+export function restore(file, baseline) {
   if (!baseline.existed) {
     if (existsSync(file)) rmSync(file);
   } else {
     mkdirSync(dirname(file), { recursive: true });
     writeFileSync(file, baseline.content);
   }
-  delete changes[file];
-}
-
-export function accept(changes, file) {
-  if (!Object.hasOwn(changes, file)) throw new Error("That change is not open.");
-  delete changes[file];
 }
 
 export function currentText(file) {

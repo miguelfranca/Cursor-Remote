@@ -27,7 +27,7 @@ const webAppFiles = new Map([
 ]);
 
 setInterval(() => hub.guardCatalog(), 1000);
-setInterval(() => hub.writeDesktopChats(), 5000);
+setInterval(() => hub.syncDesktop(), 5000);
 
 const server = http.createServer(async (request, response) => {
   const login = headerValue(request.headers["tailscale-user-login"]);

@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
+import { lineCounts } from "../diff.js";
+import { TRAILING_CHANGE } from "./exchanges.js";
 import { bytesField, fieldValues, readFields, stringField, varintField } from "./protobuf.js";
 import {
   ASSISTANT_BUBBLE,
@@ -12,16 +14,19 @@ import {
   isAssistantText,
   isTypedUserMessage,
   parseJson,
+  pendingRowKey,
   putBlob,
   readBlob,
   readBubble,
   readRecord,
+  readValue,
   recordKey,
   writeValue,
 } from "./store.js";
 
 const RECORD_VERSION = 18;
 const TEMPLATE_CANDIDATES = 40;
+const TOOL_CAPABILITY = 15;
 const DESKTOP_MODES = {
   agent: { unifiedMode: "agent", number: 1 },
   ask: { unifiedMode: "chat", number: 2 },
@@ -40,13 +45,13 @@ const STATE_FIELDS = {
 
 export class RefusedWrite extends Error {}
 
-export function writeExchanges(database, { chatId, directory, session, exchanges }) {
+export function writeExchanges(database, { chatId, directory, session, exchanges, fileChanges = [] }) {
   database.exec("BEGIN IMMEDIATE");
   try {
     const written = chatId
-      ? appendToChat(database, { chatId, directory, session, exchanges })
-      : createChat(database, { directory, session, exchanges });
-    verifyLastExchange(database, written.chatId, exchanges.at(-1));
+      ? appendToChat(database, { chatId, directory, session, exchanges, fileChanges })
+      : createChat(database, { directory, session, exchanges, fileChanges });
+    if (exchanges.length) verifyLastExchange(database, written.chatId, exchanges.at(-1));
     database.exec("COMMIT");
     return written;
   } catch (cause) {
@@ -55,14 +60,24 @@ export function writeExchanges(database, { chatId, directory, session, exchanges
   }
 }
 
-function appendToChat(database, { chatId, directory, session, exchanges }) {
+function appendToChat(database, { chatId, directory, session, exchanges, fileChanges }) {
   const record = readRecord(database, chatId);
   const headerRow = chatHeaderRow(database, chatId);
   if (!record || !headerRow) throw new RefusedWrite("The desktop chat is no longer in Cursor.");
   const state = readableState(record);
   const sources = bubbleSources(database, chatId, record) ?? findTemplate(database, directory).sources;
   const time = Math.max(Number(record.lastUpdatedAt) || 0, session.updatedAt || Date.now());
-  const appended = buildExchanges(database, { chatId, exchanges, sources, session, time });
+  record.originalFileStates ??= {};
+  const appended = buildExchanges(database, {
+    chatId,
+    workspaceId: workspaceIdOf(directory),
+    exchanges,
+    fileChanges,
+    sources,
+    session,
+    time,
+    fileStates: record.originalFileStates,
+  });
   record.conversationState = encodeState(Buffer.concat([
     state.bytes,
     ...appended.rootPrompts,
@@ -78,15 +93,26 @@ function appendToChat(database, { chatId, directory, session, exchanges }) {
   database.prepare(
     "update composerHeaders set lastUpdatedAt = ?, recency = ?, checkpointAt = ?, value = ? where composerId = ?",
   ).run(time, time, time, JSON.stringify(headerValue), chatId);
-  return { chatId, bubbles: appended.ranges };
+  return { chatId, bubbles: appended.ranges, fileChanges: appended.fileChanges };
 }
 
-function createChat(database, { directory, session, exchanges }) {
+function createChat(database, { directory, session, exchanges, fileChanges }) {
   const template = findTemplate(database, directory);
   const chatId = randomUUID();
+  const workspaceId = workspaceIdOf(directory);
   const time = session.updatedAt || Date.now();
   const mode = desktopMode(session.mode);
-  const appended = buildExchanges(database, { chatId, exchanges, sources: template.sources, session, time });
+  const fileStates = {};
+  const appended = buildExchanges(database, {
+    chatId,
+    workspaceId,
+    exchanges,
+    fileChanges,
+    sources: template.sources,
+    session,
+    time,
+    fileStates,
+  });
   const state = Buffer.concat([
     bytesField(STATE_FIELDS.rootPrompt, template.systemPrompt),
     ...appended.rootPrompts,
@@ -123,7 +149,7 @@ function createChat(database, { directory, session, exchanges }) {
     conversationMap: {},
     conversationState: encodeState(state),
     codeBlockData: {},
-    originalFileStates: {},
+    originalFileStates: fileStates,
     newlyCreatedFiles: [],
     newlyCreatedFolders: [],
     generatingBubbleIds: [],
@@ -133,7 +159,6 @@ function createChat(database, { directory, session, exchanges }) {
   };
   stampUpdated(record, time);
   writeValue(database, recordKey(chatId), JSON.stringify(record));
-  const workspaceId = desktopWorkspaceId(directory);
   const headerValue = {
     ...template.headerValue,
     ...details,
@@ -144,14 +169,22 @@ function createChat(database, { directory, session, exchanges }) {
     `insert into composerHeaders(composerId, workspaceId, createdAt, lastUpdatedAt, isArchived, isSubagent, recency, checkpointAt, value, subagentTypeName)
      values (?, ?, ?, ?, 0, 0, ?, ?, ?, '')`,
   ).run(chatId, workspaceId, time, time, time, time, JSON.stringify(headerValue));
-  return { chatId, bubbles: appended.ranges };
+  return { chatId, bubbles: appended.ranges, fileChanges: appended.fileChanges };
 }
 
-function buildExchanges(database, { chatId, exchanges, sources, session, time }) {
-  const built = { rootPrompts: [], turns: [], recentUserMessages: [], headers: [], ranges: {} };
+function buildExchanges(database, { chatId, workspaceId, exchanges, fileChanges, sources, session, time, fileStates }) {
+  const built = { rootPrompts: [], turns: [], recentUserMessages: [], headers: [], ranges: {}, fileChanges: {} };
   const modeNumber = desktopMode(session.mode).number;
   const modelName = desktopModelConfig(session).modelName;
-  for (const exchange of exchanges) {
+  const addFileChanges = (exchangeIndex) => {
+    for (const change of fileChanges.filter((candidate) => candidate.exchangeIndex === exchangeIndex)) {
+      const written = writeFileChange(database, { chatId, workspaceId, change, source: sources.assistant.bubble, time, fileStates });
+      built.headers.push(written.header);
+      built.ranges[written.header.bubbleId] = [0, 0];
+      built.fileChanges[change.path] = { bubbleId: written.header.bubbleId, diffId: written.diffId };
+    }
+  };
+  for (const [exchangeIndex, exchange] of exchanges.entries()) {
     const userBubbleId = randomUUID();
     const userMessage = Buffer.concat([
       stringField(1, exchange.userText),
@@ -168,6 +201,7 @@ function buildExchanges(database, { chatId, exchanges, sources, session, time })
     delete userBubble.checkpointId;
     writeBubble(database, chatId, userBubble);
     built.headers.push(cloneHeader(sources.user.header, userBubbleId, time));
+    addFileChanges(exchangeIndex);
     if (exchange.assistantText) {
       const step = bytesField(1, stringField(1, exchange.assistantText));
       turnParts.push(bytesField(2, putBlob(database, step)));
@@ -185,7 +219,142 @@ function buildExchanges(database, { chatId, exchanges, sources, session, time })
     built.turns.push(bytesField(STATE_FIELDS.turn, putBlob(database, turn)));
     built.recentUserMessages.push(stringField(STATE_FIELDS.recentUserMessage, userBubbleId));
   }
+  addFileChanges(TRAILING_CHANGE);
   return built;
+}
+
+function writeFileChange(database, { chatId, workspaceId, change, source, time, fileStates }) {
+  const { path, baseline, content } = change;
+  const before = baseline.content ?? "";
+  const uri = pathToFileURL(path).href;
+  const bubbleId = randomUUID();
+  const toolCallId = `toolu_remote_${randomUUID().replaceAll("-", "")}`;
+  const deleted = content === null;
+  const tool = deleted ? deleteTool({ path, before, toolCallId }) : editTool(database, { path, before, content });
+  const bubble = cloneBubble(source, { bubbleId, text: "", time });
+  bubble.capabilityType = TOOL_CAPABILITY;
+  bubble.toolFormerData = {
+    tool: tool.number,
+    toolIndex: 0,
+    modelCallId: "",
+    toolCallId,
+    status: "completed",
+    name: tool.name,
+    ...tool.details,
+    additionalData: {},
+    toolCallBinary: Buffer.concat([
+      tool.binary,
+      stringField(57, toolCallId),
+      varintField(59, time),
+      varintField(60, time),
+    ]).toString("base64"),
+  };
+  writeBubble(database, chatId, bubble);
+  if (!fileStates[uri]) {
+    const contentKey = `ofsContent:${chatId}:${uri}`;
+    writeValue(database, contentKey, before);
+    fileStates[uri] = { firstEditBubbleId: bubbleId, isNewlyCreated: !baseline.existed, newlyCreatedFolders: [], contentKey };
+  }
+  const diffId = deleted
+    ? null
+    : writePendingRow(database, { workspaceId, chatId, path, uri, before, toolCallId, rowKey: change.rowKey });
+  const header = {
+    bubbleId,
+    type: ASSISTANT_BUBBLE,
+    grouping: {
+      isRenderable: true,
+      capabilityType: TOOL_CAPABILITY,
+      toolFormerTool: tool.number,
+      toolFormerStatus: "completed",
+      toolCallId,
+      toolCallCase: tool.toolCallCase,
+      toolDisplayPath: path,
+      ...tool.grouping,
+      toolDisplayComputed: true,
+    },
+    ...timestamps(time),
+  };
+  return { header, diffId };
+}
+
+function editTool(database, { path, before, content }) {
+  const { added, removed } = lineCounts(before, content);
+  return {
+    number: 38,
+    name: "edit_file_v2",
+    toolCallCase: "editToolCall",
+    details: {
+      params: JSON.stringify({ relativeWorkspacePath: path, noCodeblock: true, cloudAgentEdit: false }),
+      result: JSON.stringify({ beforeContentId: putContent(database, before), afterContentId: putContent(database, content) }),
+    },
+    grouping: { editLinesAdded: added, editLinesRemoved: removed },
+    binary: bytesField(12, Buffer.concat([
+      bytesField(1, stringField(1, path)),
+      bytesField(2, bytesField(1, Buffer.concat([
+        stringField(1, path),
+        varintField(3, added),
+        varintField(4, removed),
+        stringField(8, `The file ${path} has been updated.`),
+      ]))),
+    ])),
+  };
+}
+
+function deleteTool({ path, before, toolCallId }) {
+  return {
+    number: 11,
+    name: "delete_file",
+    toolCallCase: "deleteToolCall",
+    details: {
+      params: JSON.stringify({ relativeWorkspacePath: path }),
+      result: "{}",
+      userDecision: "accepted",
+    },
+    grouping: {},
+    binary: bytesField(3, Buffer.concat([
+      bytesField(1, Buffer.concat([stringField(1, path), stringField(2, toolCallId)])),
+      bytesField(2, bytesField(1, Buffer.concat([
+        stringField(1, path),
+        stringField(2, path),
+        varintField(3, Buffer.byteLength(before)),
+        stringField(4, before),
+      ]))),
+    ])),
+  };
+}
+
+function writePendingRow(database, { workspaceId, chatId, path, uri, before, toolCallId, rowKey }) {
+  const originalTextLines = before.split("\n");
+  const existing = rowKey && parseJson(readValue(database, rowKey));
+  if (existing?.diffId) {
+    writeValue(database, rowKey, JSON.stringify({ ...existing, originalTextLines }));
+    return existing.diffId;
+  }
+  const diffId = randomUUID();
+  writeValue(database, pendingRowKey(workspaceId, diffId), JSON.stringify({
+    diffId,
+    uri: { $mid: 1, fsPath: path, external: uri, path, scheme: "file" },
+    originalTextLines,
+    generationUUID: randomUUID(),
+    composerMetadata: { composerId: chatId, codeblockId: toolCallId, toolCallId, composerGenerationID: randomUUID() },
+    hideDecorations: false,
+  }));
+  return diffId;
+}
+
+function putContent(database, text) {
+  const digest = putBlob(database, Buffer.from(text, "utf8"));
+  const key = `composer.content.${digest.toString("hex")}`;
+  writeValue(database, key, text);
+  return key;
+}
+
+function workspaceIdOf(directory) {
+  try {
+    return desktopWorkspaceId(directory);
+  } catch {
+    throw new RefusedWrite("The workspace folder no longer exists.");
+  }
 }
 
 function readableState(record) {
@@ -217,12 +386,7 @@ function latestBubble(database, chatId, headers, headerMatches, bubbleMatches) {
 }
 
 function findTemplate(database, directory) {
-  let workspaceId = "";
-  try {
-    workspaceId = desktopWorkspaceId(directory);
-  } catch {
-    throw new RefusedWrite("The workspace folder no longer exists.");
-  }
+  const workspaceId = workspaceIdOf(directory);
   const candidates = database.prepare(
     `select composerId, value from composerHeaders where isSubagent = 0
      order by workspaceId = ? desc, lastUpdatedAt desc limit ?`,
@@ -269,19 +433,15 @@ function rootPrompt(database, role, content) {
 }
 
 function cloneBubble(source, { bubbleId, text, time }) {
-  return {
-    ...structuredClone(source),
-    bubbleId,
-    text,
-    createdAt: new Date(time).toISOString(),
-    startedAtMs: time,
-    completedAtMs: time,
-    conversationState: "~",
-  };
+  return { ...structuredClone(source), bubbleId, text, ...timestamps(time), conversationState: "~" };
 }
 
 function cloneHeader(source, bubbleId, time) {
-  return { ...source, bubbleId, createdAt: new Date(time).toISOString(), startedAtMs: time, completedAtMs: time };
+  return { ...source, bubbleId, ...timestamps(time) };
+}
+
+function timestamps(time) {
+  return { createdAt: new Date(time).toISOString(), startedAtMs: time, completedAtMs: time };
 }
 
 function emptiedLists(context) {

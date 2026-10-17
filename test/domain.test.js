@@ -7,7 +7,7 @@ import test from "node:test";
 import { createCatalog } from "../src/catalog.js";
 import { displayText, normalizeFiles, promptBlocks } from "../src/files.js";
 import { ideProjectDirectories } from "../src/ide-projects.js";
-import { accept, currentText, remember, repairBaseline, undo } from "../src/changes.js";
+import { currentText, remember, repairBaseline, restore } from "../src/changes.js";
 import { activityLabel, commandKey, isFileMutation, pathsFromTool, priorFromTool } from "../src/command-key.js";
 import { diffParts, unifiedDiff } from "../src/diff.js";
 import { renderMarkdown } from "../src/markdown.js";
@@ -67,7 +67,7 @@ test("file attachments become image and resource prompt blocks", () => {
   assert.throws(() => normalizeFiles([{ name: "bad.bin", data: "!!!!" }]));
 });
 
-test("undo restores an edit, a created file, and a deleted file", () => {
+test("restore brings back a created file and a deleted file", () => {
   const root = mkdtempSync(join(tmpdir(), "changes-"));
   const edited = join(root, "edited.txt");
   const created = join(root, "created.txt");
@@ -82,13 +82,13 @@ test("undo restores an edit, a created file, and a deleted file", () => {
   writeFileSync(created, "new");
   writeFileSync(deleted, "");
   rmSync(deleted);
-  undo(changes, created);
-  undo(changes, deleted);
+  restore(created, changes[created]);
+  restore(deleted, changes[deleted]);
   assert.equal(currentText(created), null);
   assert.equal(currentText(deleted), "keep");
-  accept(changes, edited);
   assert.equal(currentText(edited), "agent");
-  assert.deepEqual(changes, {});
+  assert.equal(changes[edited].existed, true);
+  assert.equal(changes[edited].content, "mine");
 });
 
 test("allow for the session matches one exact command", () => {

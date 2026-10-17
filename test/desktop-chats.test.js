@@ -4,6 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 import { continuationPrompt, createDesktopChats } from "../src/desktop-chats/index.js";
 import { pendingExchanges } from "../src/desktop-chats/exchanges.js";
 import { isDesktopIdeRunning, profileOfStore } from "../src/desktop-chats/ide-running.js";
@@ -16,6 +17,8 @@ function seededStore() {
   const root = mkdtempSync(join(tmpdir(), "desktop-chats-"));
   const workspace = join(root, "Cursor Remote");
   mkdirSync(workspace);
+  const authFile = join(workspace, "auth.ts");
+  writeFileSync(authFile, "new auth\n");
   const storeFile = join(root, "profile", "User", "globalStorage", "state.vscdb");
   mkdirSync(join(storeFile, ".."), { recursive: true });
   const database = new DatabaseSync(storeFile);
@@ -35,6 +38,12 @@ function seededStore() {
     fullConversationHeadersOnly: [
       { bubbleId: "user-1", type: 1 },
       { bubbleId: "thinking-1", type: 2, grouping: { capabilityType: 30 } },
+      {
+        bubbleId: "edit-1",
+        type: 2,
+        grouping: { capabilityType: 15, toolCallCase: "editToolCall", toolCallId: "tool-1", toolDisplayPath: authFile },
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
       { bubbleId: "reply-1", type: 2 },
       { bubbleId: "notice-1", type: 1, grouping: { isSimulatedMsg: true } },
       { bubbleId: "notice-reply-1", type: 2 },
@@ -59,12 +68,29 @@ function seededStore() {
   for (const [bubbleId, bubble] of Object.entries(bubbles)) {
     insert.run(`bubbleId:${templateChatId}:${bubbleId}`, JSON.stringify(bubble));
   }
+  insert.run(`inlineDiff:${desktopWorkspaceId(workspace)}:diff-1`, JSON.stringify({
+    diffId: "diff-1",
+    uri: { fsPath: authFile },
+    originalTextLines: ["old auth", ""],
+    composerMetadata: { composerId: templateChatId, toolCallId: "tool-1" },
+  }));
   database.prepare(
     "insert into composerHeaders values (?, ?, 1000, 1000, 0, 0, 1000, 1000, ?, '')",
   ).run(templateChatId, desktopWorkspaceId(workspace), JSON.stringify({ name: "Fix the login bug" }));
   database.close();
   const desktop = createDesktopChats({ storeFile, ideRunning: () => false });
-  return { workspace, storeFile, desktop };
+  return { workspace, storeFile, desktop, authFile };
+}
+
+function readValue(storeFile, key) {
+  const database = new DatabaseSync(storeFile, { readOnly: true });
+  const value = database.prepare("select value from cursorDiskKV where key = ?").get(key)?.value;
+  database.close();
+  return value === undefined ? undefined : String(value);
+}
+
+function spoken(messages) {
+  return messages.map((message) => message.text ?? `change ${message.path}`);
 }
 
 function phoneSession(overrides) {
@@ -74,21 +100,80 @@ function phoneSession(overrides) {
     mode: "ask",
     configOptions: [{ category: "model", currentValue: "grok-4.7[fast=true]" }],
     transcript: [],
+    changes: {},
     updatedAt: 5000,
     ...overrides,
   };
 }
 
 test("desktop chats are read from the IDE store without thinking, tool steps, or background task notices", () => {
-  const { workspace, desktop } = seededStore();
+  const { workspace, desktop, authFile } = seededStore();
   assert.deepEqual(desktop.list(workspace), [{ id: templateChatId, title: "Fix the login bug", updatedAt: 1000 }]);
-  assert.deepEqual(
-    desktop.read(templateChatId).messages.map(({ role, text }) => ({ role, text })),
-    [{ role: "user", text: "Fix the login bug" }, { role: "assistant", text: "I will inspect auth.ts." }],
-  );
+  assert.deepEqual(desktop.read(templateChatId).messages, [
+    { bubbleId: "user-1", role: "user", text: "Fix the login bug" },
+    { bubbleId: "edit-1", role: "change", path: authFile, action: "edit" },
+    { bubbleId: "reply-1", role: "assistant", text: "I will inspect auth.ts." },
+  ]);
   const prompt = continuationPrompt(desktop.read(templateChatId).messages, "Do that next.");
   assert.match(prompt, /Fix the login bug/);
+  assert.equal(prompt.includes(authFile), false);
   assert.match(prompt, /Do that next\.$/);
+});
+
+test("desktop pending edits show as changes, and the earliest baseline wins", () => {
+  const { workspace, desktop, authFile } = seededStore();
+  const [desktopChange] = desktop.changes({ directory: workspace, chatId: templateChatId });
+  assert.equal(desktopChange.path, authFile);
+  assert.equal(desktopChange.own, false);
+  assert.deepEqual(desktopChange.baseline, { existed: true, content: "old auth\n" });
+
+  const phoneBaseline = (touchedAt) => ({ [authFile]: { existed: true, content: "middle auth\n", touchedAt } });
+  const phoneLater = desktop.changes({ directory: workspace, chatId: templateChatId, ownChanges: phoneBaseline(Date.parse("2026-02-01")) });
+  assert.equal(phoneLater.length, 1);
+  assert.equal(phoneLater[0].baseline.content, "old auth\n");
+  assert.deepEqual(phoneLater[0].rowKeys, desktopChange.rowKeys);
+  const phoneEarlier = desktop.changes({ directory: workspace, chatId: templateChatId, ownChanges: phoneBaseline(Date.parse("2025-12-01")) });
+  assert.equal(phoneEarlier[0].baseline.content, "middle auth\n");
+
+  assert.deepEqual(desktop.changes({ directory: workspace, chatId: templateChatId, rowsToRemove: desktopChange.rowKeys }), []);
+  assert.equal(desktop.removeRows(desktopChange.rowKeys), true);
+  assert.deepEqual(desktop.pendingRows(workspace), []);
+});
+
+test("a phone change is written into the desktop chat as an edit with a pending row", () => {
+  const { workspace, storeFile, desktop } = seededStore();
+  const page = join(workspace, "page.js");
+  writeFileSync(page, "after\n");
+  const session = phoneSession({
+    ideChatId: templateChatId,
+    changes: { [page]: { existed: true, content: "before\n", touchedAt: 6000 } },
+    transcript: [
+      { role: "user", text: "Edit the page" },
+      { role: "change", path: page, action: "edit" },
+      { role: "assistant", text: "Edited." },
+    ],
+  });
+
+  assert.equal(desktop.write(workspace, session), true);
+  const diffId = session.changes[page].desktopDiffId;
+  const row = desktop.pendingRows(workspace).find((candidate) => candidate.diffId === diffId);
+  assert.equal(row.chatId, templateChatId);
+  assert.deepEqual(row.originalLines, ["before", ""]);
+  const pageChange = desktop.changes({ directory: workspace, chatId: templateChatId, ownChanges: session.changes })
+    .find((change) => change.path === page);
+  assert.deepEqual(pageChange.rowKeys, [row.rowKey]);
+
+  const record = JSON.parse(readValue(storeFile, `composerData:${templateChatId}`));
+  const appended = record.fullConversationHeadersOnly.slice(-3);
+  assert.deepEqual(appended.map((header) => header.type), [1, 2, 2]);
+  assert.equal(appended[1].grouping.toolDisplayPath, page);
+  assert.equal(appended[1].grouping.editLinesAdded, 1);
+  const fileState = record.originalFileStates[pathToFileURL(page).href];
+  assert.equal(readValue(storeFile, fileState.contentKey), "before\n");
+  assert.equal(fileState.firstEditBubbleId, appended[1].bubbleId);
+
+  assert.deepEqual(desktop.transcript(session).slice(3), session.transcript);
+  assert.equal(desktop.write(workspace, session), false);
 });
 
 test("a phone session becomes a desktop chat once its exchanges finish", () => {
@@ -103,7 +188,7 @@ test("a phone session becomes a desktop chat once its exchanges finish", () => {
     ],
   });
 
-  assert.equal(desktop.write(workspace, session, true), true);
+  assert.equal(desktop.write(workspace, session, { lastIsRunning: true }), true);
   assert.ok(session.ideChatId);
   assert.equal(session.desktopWritten, 4);
   assert.deepEqual(desktop.status(session), { state: "waiting" });
@@ -114,11 +199,11 @@ test("a phone session becomes a desktop chat once its exchanges finish", () => {
   );
   assert.deepEqual(desktop.transcript(session), session.transcript);
 
-  assert.equal(desktop.write(workspace, session, false), true);
+  assert.equal(desktop.write(workspace, session), true);
   assert.equal(session.desktopWritten, 5);
   assert.equal(desktop.status(session), null);
   assert.deepEqual(desktop.transcript(session), session.transcript);
-  assert.equal(desktop.write(workspace, session, false), false);
+  assert.equal(desktop.write(workspace, session), false);
 
   const database = new DatabaseSync(storeFile, { readOnly: true });
   const record = JSON.parse(database.prepare("select value from cursorDiskKV where key = ?").get(`composerData:${session.ideChatId}`).value);
@@ -134,33 +219,54 @@ test("a phone session becomes a desktop chat once its exchanges finish", () => {
   assert.deepEqual(userBubble.context, { fileSelections: [] });
 });
 
-test("a session that continued a desktop chat adds its lines after what the IDE saved", () => {
+test("a phone deletion is written as a desktop delete message without a pending row", () => {
   const { workspace, storeFile, desktop } = seededStore();
+  const gone = join(workspace, "gone.txt");
+  const session = phoneSession({
+    ideChatId: templateChatId,
+    changes: { [gone]: { existed: true, content: "bye\n", touchedAt: 6000 } },
+    transcript: [
+      { role: "user", text: "Remove gone.txt" },
+      { role: "change", path: gone, action: "delete" },
+      { role: "assistant", text: "Removed." },
+    ],
+  });
+
+  assert.equal(desktop.write(workspace, session), true);
+  const { desktopBubbleId, desktopDiffId } = session.changes[gone];
+  assert.ok(desktopBubbleId);
+  assert.equal(desktopDiffId, undefined);
+  assert.equal(desktop.pendingRows(workspace).some((row) => row.path === gone), false);
+  const bubble = JSON.parse(readValue(storeFile, `bubbleId:${templateChatId}:${desktopBubbleId}`));
+  assert.equal(bubble.toolFormerData.name, "delete_file");
+  const record = JSON.parse(readValue(storeFile, `composerData:${templateChatId}`));
+  assert.equal(readValue(storeFile, record.originalFileStates[pathToFileURL(gone).href].contentKey), "bye\n");
+  assert.deepEqual(
+    desktop.read(templateChatId).messages.find((message) => message.path === gone),
+    { bubbleId: desktopBubbleId, role: "change", path: gone, action: "delete" },
+  );
+  assert.equal(desktop.write(workspace, session), false);
+});
+
+test("a session that continued a desktop chat adds its lines after what the IDE saved", () => {
+  const { workspace, storeFile, desktop, authFile } = seededStore();
   const session = phoneSession({
     ideChatId: templateChatId,
     transcript: [{ role: "user", text: "Also cover the refresh token" }, { role: "assistant", text: "Covered." }],
   });
 
-  assert.deepEqual(desktop.transcript(session).map((message) => message.text), [
+  const expected = [
     "Fix the login bug",
+    `change ${authFile}`,
     "I will inspect auth.ts.",
     "Also cover the refresh token",
     "Covered.",
-  ]);
-  assert.equal(desktop.write(workspace, session, false), true);
+  ];
+  assert.deepEqual(spoken(desktop.transcript(session)), expected);
+  assert.equal(desktop.write(workspace, session), true);
   assert.equal(session.ideChatId, templateChatId);
-  assert.deepEqual(desktop.read(templateChatId).messages.map((message) => message.text), [
-    "Fix the login bug",
-    "I will inspect auth.ts.",
-    "Also cover the refresh token",
-    "Covered.",
-  ]);
-  assert.deepEqual(desktop.transcript(session).map((message) => message.text), [
-    "Fix the login bug",
-    "I will inspect auth.ts.",
-    "Also cover the refresh token",
-    "Covered.",
-  ]);
+  assert.deepEqual(spoken(desktop.read(templateChatId).messages), expected);
+  assert.deepEqual(spoken(desktop.transcript(session)), expected);
   const [userBubbleId] = Object.keys(session.desktopBubbles);
   const database = new DatabaseSync(storeFile, { readOnly: true });
   const userBubble = JSON.parse(database.prepare("select value from cursorDiskKV where key = ?")
@@ -181,11 +287,11 @@ test("a desktop chat in an unknown format refuses the write and keeps the lines 
     transcript: [{ role: "user", text: "Hello" }, { role: "assistant", text: "Hi." }],
   });
 
-  assert.equal(desktop.write(workspace, session, false), true);
+  assert.equal(desktop.write(workspace, session), true);
   assert.equal(desktop.status(session).state, "refused");
   assert.match(desktop.status(session).reason, /version 19/);
   assert.equal(session.desktopWritten, undefined);
-  assert.equal(desktop.write(workspace, session, false), false);
+  assert.equal(desktop.write(workspace, session), false);
 });
 
 test("pending exchanges keep leading change markers and skip the running one", () => {

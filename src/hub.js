@@ -7,7 +7,7 @@ import { readJson, writeJson } from "./json-file.js";
 import { createCatalog } from "./catalog.js";
 import { continuationPrompt, createDesktopChats } from "./desktop-chats/index.js";
 import { ideProjectDirectories } from "./ide-projects.js";
-import { accept, currentText, remember, repairBaseline, undo } from "./changes.js";
+import { currentText, remember, repairBaseline, restore } from "./changes.js";
 import { activityLabel, commandKey, isFileMutation, mutationAction, pathsFromTool, priorFromTool } from "./command-key.js";
 import { diffParts, unifiedDiff } from "./diff.js";
 import { displayText, normalizeFiles, promptBlocks } from "./files.js";
@@ -96,18 +96,67 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     publish();
   }
 
-  function writeDesktopChats() {
-    if (desktop.ideRunning()) return;
-    const runningSession = running ? activeSession() : null;
-    let changed = false;
-    for (const [directory, workspace] of Object.entries(state.workspaces)) {
-      for (const session of Object.values(workspace.sessions)) {
-        if (desktop.write(directory, session, session === runningSession)) changed = true;
-      }
-    }
+  function syncDesktop() {
+    let changed = followDesktopAnswers();
+    if (!desktop.ideRunning()) changed = writeDesktopChats() || changed;
     if (!changed) return;
     saveNow();
     publish();
+  }
+
+  function followDesktopAnswers() {
+    let changed = false;
+    for (const [directory, workspace] of Object.entries(state.workspaces)) {
+      const rows = desktop.pendingRows(directory);
+      if (!rows) continue;
+      const pendingDiffIds = new Set(rows.map((row) => row.diffId));
+      for (const session of Object.values(workspace.sessions)) {
+        for (const [file, baseline] of Object.entries(session.changes)) {
+          if (!baseline.desktopDiffId || pendingDiffIds.has(baseline.desktopDiffId)) continue;
+          delete session.changes[file];
+          changed = true;
+        }
+      }
+    }
+    return changed;
+  }
+
+  function writeDesktopChats() {
+    const runningSession = running ? activeSession() : null;
+    const rowsToRemove = state.desktopRowsToRemove ?? [];
+    let changed = false;
+    for (const [directory, workspace] of Object.entries(state.workspaces)) {
+      for (const session of Object.values(workspace.sessions)) {
+        if (desktop.write(directory, session, { lastIsRunning: session === runningSession, rowsToRemove })) changed = true;
+      }
+    }
+    if (rowsToRemove.length && desktop.removeRows(rowsToRemove)) {
+      state.desktopRowsToRemove = [];
+      changed = true;
+    }
+    return changed;
+  }
+
+  function openConversation() {
+    const directory = state.activeWorkspace;
+    const workspace = directory ? state.workspaces[directory] : null;
+    return workspace ? { directory, workspace, ...shown(workspace, directory) } : {};
+  }
+
+  function conversationChanges({ directory, session, chat }) {
+    if (!session && !chat) return [];
+    return desktop.changes({
+      directory,
+      chatId: session ? session.ideChatId : chat.id,
+      ownChanges: session?.changes,
+      rowsToRemove: state.desktopRowsToRemove,
+    });
+  }
+
+  function answerChange(session, change, action) {
+    if (action === "undo") restore(change.path, change.baseline);
+    if (session) delete session.changes[change.path];
+    state.desktopRowsToRemove = [...new Set([...(state.desktopRowsToRemove ?? []), ...change.rowKeys])];
   }
 
   guardCatalog();
@@ -120,7 +169,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
       return () => listeners.delete(listener);
     },
     guardCatalog,
-    writeDesktopChats,
+    syncDesktop,
     selectWorkspace(directory) {
       requireIdle();
       if (!catalog.has(directory)) throw new Error("That directory is not in the catalog.");
@@ -256,26 +305,25 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     },
     change(file, action) {
       requireIdle();
-      const session = activeSession();
-      if (!session) throw new Error("There is no session.");
-      applyChange(session, file, action);
+      const open = openConversation();
+      const change = conversationChanges(open).find((candidate) => candidate.path === file);
+      if (!change) throw new Error("That change is not open.");
+      answerChange(open.session, change, action);
       saveNow();
       publish();
     },
     changeAll(action) {
       requireIdle();
-      const session = activeSession();
-      if (!session) return;
-      for (const file of Object.keys(session.changes)) applyChange(session, file, action);
+      const open = openConversation();
+      for (const change of conversationChanges(open)) answerChange(open.session, change, action);
       saveNow();
       publish();
     },
   };
 
   function view() {
-    const directory = state.activeWorkspace;
-    const workspace = directory ? state.workspaces[directory] : null;
-    const open = workspace && directory ? shown(workspace, directory) : {};
+    const open = openConversation();
+    const { directory = state.activeWorkspace, workspace = null } = open;
     const session = open.session ?? null;
     if (session) ensureChangeMarks(session);
     const skills = listSkills(directory);
@@ -304,7 +352,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
         pinned: session?.pinned?.includes(name) ?? false,
       })),
       pending: waiter?.view ?? null,
-      changes: session ? changeViews(session) : [],
+      changes: changeViews(open),
     };
   }
 
@@ -337,11 +385,10 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     return chat ? { chat } : {};
   }
 
-  function changeViews(session) {
-    return Object.entries(session.changes).flatMap(([file, baseline]) => {
-      const parts = diffParts(baseline.content, currentText(file));
-      if (!parts.length) return [];
-      return [{ path: file, parts }];
+  function changeViews(open) {
+    return conversationChanges(open).flatMap(({ path, baseline }) => {
+      const parts = diffParts(baseline.content, currentText(path));
+      return parts.length ? [{ path, parts }] : [];
     });
   }
 
@@ -654,11 +701,6 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     error = cause instanceof Error ? cause.message : String(cause);
     publish();
   }
-}
-
-function applyChange(session, file, action) {
-  if (action === "undo") undo(session.changes, file);
-  else accept(session.changes, file);
 }
 
 function optionFor(options, kind) {

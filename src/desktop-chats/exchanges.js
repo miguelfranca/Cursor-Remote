@@ -23,9 +23,16 @@ export function linkedTranscript(chatMessages, session) {
   const shown = chatMessages.flatMap((message) => {
     const range = ranges[message.bubbleId];
     if (range) return session.transcript.slice(range[0], range[1]);
-    return [{ role: message.role, text: message.text }];
+    const { bubbleId, ...shownMessage } = message;
+    return [shownMessage];
   });
   return [...shown, ...session.transcript.slice(session.desktopWritten ?? 0)];
+}
+
+export const TRAILING_CHANGE = -1;
+
+export function exchangeIndexOf(exchanges, transcriptIndex) {
+  return exchanges.findIndex((exchange) => transcriptIndex >= exchange.userRange[0] && transcriptIndex < exchange.end);
 }
 
 function finish(exchange, end) {
