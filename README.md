@@ -13,6 +13,7 @@ Use a Cursor agent on your PC from your phone or another computer. Only your Tai
 - Switch workspaces.
 - Continue a chat from the phone to Cursor on the PC, and the other way around.
 - Accept or undo file changes.
+- Allow a command before it runs.
 - Install the page on your phone.
 
 Setup: [docs/setup.md](docs/setup.md).
