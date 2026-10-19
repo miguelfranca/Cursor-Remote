@@ -1,7 +1,18 @@
 # Cursor Remote
 
-Drive a Cursor agent on your PC from a phone or another computer. The page is on your Tailscale network only, and only your Tailscale login can open it.
+Use a Cursor agent on your PC from your phone or another computer. Only your Tailscale login can open the page.
 
-Your Tailscale login lives in `.env` on your machine. Your Cursor login is whichever account you use for `agent login`. The repo itself only has placeholders.
+<p>
+  <img src="docs/screenshots/phone-chat.png" alt="Chat with the agent on a phone" width="230">
+  <img src="docs/screenshots/phone-workspaces.png" alt="Workspace and chat list on a phone" width="230">
+  <img src="docs/screenshots/phone-changes.png" alt="A file diff with Accept and Undo" width="230">
+  <img src="docs/screenshots/phone-install.png" alt="Install the page or create a home-screen shortcut" width="230">
+</p>
 
-Setup starts from a PC with nothing installed yet: [docs/setup.md](docs/setup.md).
+- Chat with the agent.
+- Switch workspaces.
+- Continue a chat from the phone to Cursor on the PC, and the other way around.
+- Accept or undo file changes.
+- Install the page on your phone.
+
+Setup: [docs/setup.md](docs/setup.md).
