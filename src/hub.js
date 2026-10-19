@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { Readable, Writable } from "node:stream";
 import { homedir } from "node:os";
@@ -14,6 +15,14 @@ import { displayText, normalizeFiles, promptBlocks } from "./files.js";
 import { composePrompt, listSkills, skillBodies } from "./skills.js";
 
 const MODES = ["agent", "plan", "ask"];
+
+export function queueAfterRun(run) {
+  if (!run) return "keep";
+  if (run.sendNowId) return "send-now";
+  if (run.stopped || run.failed) return "keep";
+  if (run.stopReason === "end_turn") return "send-next";
+  return "keep";
+}
 
 export function createHub({ dataDir, agentBin, ideStorage }) {
   const catalog = createCatalog(join(dataDir, "catalog.json"));
@@ -241,9 +250,49 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     },
     stop() {
       const session = activeSession();
-      if (!session || !runs.has(session.id) || !connection) return;
+      const run = session ? runs.get(session.id) : null;
+      if (!run || !connection) return;
+      run.stopped = true;
       connection.cancel({ sessionId: session.id }).catch(() => {});
       finishWait(session.id, { outcome: { outcome: "cancelled" } });
+    },
+    editQueued(id, text) {
+      const item = queuedItem(activeSession(), id);
+      const message = String(text ?? "").trim();
+      if (!message && item.files.length === 0) throw new Error("Write a message or attach a file.");
+      item.text = message;
+      saveNow();
+      publish();
+    },
+    removeQueued(id) {
+      const session = activeSession();
+      if (!session?.queue?.some((item) => item.id === id)) throw new Error("That queued message is gone.");
+      session.queue = session.queue.filter((item) => item.id !== id);
+      saveNow();
+      publish();
+    },
+    async sendNow(id) {
+      const session = activeSession();
+      queuedItem(session, id);
+      const run = runs.get(session.id);
+      if (run) {
+        run.stopped = true;
+        run.sendNowId = id;
+        if (connection) connection.cancel({ sessionId: session.id }).catch(() => {});
+        finishWait(session.id, { outcome: { outcome: "cancelled" } });
+        publish();
+        return;
+      }
+      const item = takeQueued(session, id);
+      try {
+        await beginFollowUp(session, item);
+      } catch (cause) {
+        session.queue ??= [];
+        session.queue.unshift(item);
+        saveNow();
+        publish();
+        throw cause;
+      }
     },
     answerPermission(decision) {
       const session = activeSession();
@@ -402,6 +451,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
         pinned: session?.pinned?.includes(name) ?? false,
       })),
       pending: waiter?.view ?? null,
+      queue: queueViews(session),
       changes: changeViews(open),
     };
   }
@@ -461,16 +511,64 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     if (added) save();
   }
 
-  async function send(text, skillNames, fresh, prior, files) {
-    const directory = state.activeWorkspace;
-    if (!directory) throw new Error("Choose a workspace first.");
+  function messageParts(text, skillNames, files) {
     const attached = normalizeFiles(files);
     const message = String(text ?? "").trim();
     if (!message && attached.length === 0) throw new Error("Write a message or attach a file.");
+    return { message, attached, skills: [...new Set(skillNames ?? [])] };
+  }
+
+  function enqueue(session, message, skills, files) {
+    session.queue ??= [];
+    session.queue.push({ id: randomUUID(), text: message, skills, files });
+    saveNow();
+    publish();
+  }
+
+  function queuedItem(session, id) {
+    const item = session?.queue?.find((entry) => entry.id === id);
+    if (!item) throw new Error("That queued message is gone.");
+    return item;
+  }
+
+  function takeQueued(session, id) {
+    const item = queuedItem(session, id);
+    session.queue = session.queue.filter((entry) => entry.id !== id);
+    return item;
+  }
+
+  function queueViews(session) {
+    return (session?.queue ?? []).map((item) => ({
+      id: item.id,
+      text: item.text,
+      skills: item.skills ?? [],
+      files: (item.files ?? []).map((file) => file.name),
+    }));
+  }
+
+  function sessionDirectory(session) {
+    for (const [directory, workspace] of Object.entries(state.workspaces)) {
+      if (workspace.sessions[session.id]) return directory;
+    }
+    return state.activeWorkspace;
+  }
+
+  async function send(text, skillNames, fresh, prior, files) {
+    const directory = state.activeWorkspace;
+    if (!directory) throw new Error("Choose a workspace first.");
+    const { message, attached, skills } = messageParts(text, skillNames, files);
     const workspace = workspaceRecord(directory);
+    if (!fresh) {
+      const current = activeSession();
+      if (!current) throw new Error("Send a message to start a chat.");
+      if (runs.has(current.id)) {
+        enqueue(current, message, skills, attached);
+        return;
+      }
+      requireSessionIdle(current);
+    }
     await ensureAgent();
     let session = fresh ? null : activeSession();
-    if (!fresh) requireSessionIdle(session);
     if (fresh) {
       const created = await connection.newSession({ cwd: directory, mcpServers: [] });
       session = {
@@ -483,6 +581,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
         pinned: [],
         allowances: [],
         transcript: [],
+        queue: [],
         changes: {},
         ideChatId: prior?.id ?? null,
         updatedAt: Date.now(),
@@ -493,16 +592,23 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
       workspace.activeIdeChatId = null;
       await applyAutoModel(session);
       await applyMode(session);
-    } else if (!liveSessions.has(session.id)) {
-      await openLoaded(session, directory);
     }
-    const names = [...new Set([...(skillNames ?? []), ...session.pinned])];
-    const textPrompt = composePrompt(
-      prior ? continuationPrompt(prior.messages, message || "Continue with the attached files.") : message,
-      skillBodies(directory, names),
-    );
-    const blocks = promptBlocks(textPrompt, attached);
-    append(session, "user", displayText(message, attached));
+    const item = {
+      text: prior ? continuationPrompt(prior.messages, message || "Continue with the attached files.") : message,
+      display: message,
+      skills,
+      files: attached,
+    };
+    await beginFollowUp(session, item);
+  }
+
+  async function beginFollowUp(session, item) {
+    const directory = sessionDirectory(session);
+    await ensureAgent();
+    if (!liveSessions.has(session.id)) await openLoaded(session, directory);
+    const names = [...new Set([...(item.skills ?? []), ...session.pinned])];
+    const blocks = promptBlocks(composePrompt(item.text, skillBodies(directory, names)), item.files);
+    append(session, "user", displayText(item.display ?? item.text, item.files));
     session.updatedAt = Date.now();
     runs.set(session.id, { activity: "Thinking" });
     error = "";
@@ -512,14 +618,38 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
   }
 
   function runPrompt(session, blocks) {
+    const run = runs.get(session.id);
     connection.prompt({
       sessionId: session.id,
       prompt: blocks,
-    }).catch(showError).finally(() => {
+    }).then((result) => {
+      if (run) run.stopReason = result?.stopReason || "end_turn";
+    }).catch((cause) => {
+      if (run) run.failed = true;
+      if (!run?.stopped && !run?.sendNowId) showError(cause);
+    }).finally(() => {
       runs.delete(session.id);
       finishWait(session.id, { outcome: { outcome: "cancelled" } });
+      const action = queueAfterRun(run);
       saveNow();
       publish();
+      if (action === "keep") return;
+      let item = null;
+      try {
+        item = action === "send-now" ? takeQueued(session, run.sendNowId) : session.queue?.shift() ?? null;
+      } catch (cause) {
+        showError(cause);
+        return;
+      }
+      if (!item) return;
+      saveNow();
+      beginFollowUp(session, item).catch((cause) => {
+        session.queue ??= [];
+        session.queue.unshift(item);
+        showError(cause);
+        saveNow();
+        publish();
+      });
     });
   }
 
@@ -574,6 +704,11 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     agentProcess.on("exit", () => {
       connection = null;
       starting = null;
+      for (const run of runs.values()) {
+        run.stopped = true;
+        run.failed = true;
+        run.sendNowId = null;
+      }
       runs.clear();
       liveSessions.clear();
       for (const id of [...waits.keys()]) finishWait(id, { outcome: { outcome: "cancelled" } });
