@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { lineCounts } from "../diff.js";
+import { baselineLines } from "./changes.js";
 import { TRAILING_CHANGE } from "./exchanges.js";
 import { bytesField, fieldValues, readFields, stringField, varintField } from "./protobuf.js";
 import {
@@ -45,12 +46,15 @@ const STATE_FIELDS = {
 
 export class RefusedWrite extends Error {}
 
+function replacePendingLines(database, rowKey, originalTextLines) {
+  const existing = parseJson(readValue(database, rowKey));
+  if (!existing?.diffId) return null;
+  writeValue(database, rowKey, JSON.stringify({ ...existing, originalTextLines }));
+  return existing.diffId;
+}
+
 export function repairPendingBaselines(database, repairs) {
-  for (const repair of repairs) {
-    const existing = parseJson(readValue(database, repair.rowKey));
-    if (!existing?.diffId) continue;
-    writeValue(database, repair.rowKey, JSON.stringify({ ...existing, originalTextLines: repair.originalTextLines }));
-  }
+  for (const repair of repairs) replacePendingLines(database, repair.rowKey, repair.originalTextLines);
 }
 
 export function writeExchanges(database, { chatId, directory, session, exchanges, fileChanges = [] }) {
@@ -267,7 +271,7 @@ function writeFileChange(database, { chatId, workspaceId, change, source, time, 
     fileRecord.originalFileStates[uri] = { firstEditBubbleId: bubbleId, isNewlyCreated: !baseline.existed, newlyCreatedFolders: [], contentKey };
     if (!baseline.existed) fileRecord.newlyCreatedFiles.push({ uri: fileUri(path) });
   }
-  const originalTextLines = baseline.existed ? before.split("\n") : [];
+  const originalTextLines = baselineLines(baseline);
   const diffId = deleted
     ? null
     : writePendingRow(database, { workspaceId, chatId, path, originalTextLines, toolCallId, rowKey: change.rowKey });
@@ -337,10 +341,9 @@ function deleteTool({ path, before, toolCallId }) {
 }
 
 function writePendingRow(database, { workspaceId, chatId, path, originalTextLines, toolCallId, rowKey }) {
-  const existing = rowKey && parseJson(readValue(database, rowKey));
-  if (existing?.diffId) {
-    writeValue(database, rowKey, JSON.stringify({ ...existing, originalTextLines }));
-    return existing.diffId;
+  if (rowKey) {
+    const diffId = replacePendingLines(database, rowKey, originalTextLines);
+    if (diffId) return diffId;
   }
   const diffId = randomUUID();
   writeValue(database, pendingRowKey(workspaceId, diffId), JSON.stringify({

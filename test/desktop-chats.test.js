@@ -124,7 +124,7 @@ test("desktop pending edits show as changes, and the earliest baseline wins", ()
   const { workspace, desktop, authFile } = seededStore();
   const [desktopChange] = desktop.changes({ directory: workspace, chatId: templateChatId });
   assert.equal(desktopChange.path, authFile);
-  assert.equal(desktopChange.own, false);
+  assert.equal(desktopChange.fromSession, false);
   assert.deepEqual(desktopChange.baseline, { existed: true, content: "old auth\n" });
 
   const phoneBaseline = (touchedAt) => ({ [authFile]: { existed: true, content: "middle auth\n", touchedAt } });

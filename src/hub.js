@@ -147,15 +147,20 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     return { directory, workspace, ...open, chatId: open.session ? open.session.ideChatId : open.chat?.id ?? null };
   }
 
-  function conversationChanges({ directory, session, chat, chatId }) {
+  function openChanges({ directory, session, chat, chatId }) {
     if (!session && !chat) return [];
     return desktop.changes({ directory, chatId, ownChanges: session?.changes, rowsToRemove: state.desktopRowsToRemove });
+  }
+
+  function queueRowKeys(rowKeys) {
+    if (!rowKeys.length) return;
+    state.desktopRowsToRemove = [...new Set([...(state.desktopRowsToRemove ?? []), ...rowKeys])];
   }
 
   function answerChange(session, change, action) {
     if (action === "undo") restore(change.path, change.baseline);
     if (session) delete session.changes[change.path];
-    state.desktopRowsToRemove = [...new Set([...(state.desktopRowsToRemove ?? []), ...change.rowKeys])];
+    queueRowKeys(change.rowKeys);
   }
 
   guardCatalog();
@@ -303,7 +308,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     change(file, action) {
       requireIdle();
       const open = openConversation();
-      const change = conversationChanges(open).find((candidate) => candidate.path === file);
+      const change = openChanges(open).find((candidate) => candidate.path === file);
       if (!change) throw new Error("That change is not open.");
       answerChange(open.session, change, action);
       saveNow();
@@ -312,7 +317,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     changeAll(action) {
       requireIdle();
       const open = openConversation();
-      for (const change of conversationChanges(open)) answerChange(open.session, change, action);
+      for (const change of openChanges(open)) answerChange(open.session, change, action);
       saveNow();
       publish();
     },
@@ -383,7 +388,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
   }
 
   function changeViews(open) {
-    return conversationChanges(open).flatMap(({ path, baseline }) => {
+    return openChanges(open).flatMap(({ path, baseline }) => {
       const parts = changeParts(baseline, currentText(path));
       return parts.length ? [{ path, parts }] : [];
     });
@@ -630,8 +635,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     const directory = state.activeWorkspace;
     if (!directory) return;
     const row = (desktop.pendingRows(directory) ?? []).find((candidate) => candidate.diffId === diffId);
-    if (!row) return;
-    state.desktopRowsToRemove = [...new Set([...(state.desktopRowsToRemove ?? []), row.rowKey])];
+    if (row) queueRowKeys([row.rowKey]);
   }
 
   function extMethod(method, params) {

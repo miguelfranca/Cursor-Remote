@@ -1,6 +1,6 @@
 import { currentText } from "../changes.js";
 import { changeParts } from "../diff.js";
-import { conversationChanges, rowBaseline } from "./changes.js";
+import { baselineLines, conversationChanges, rowBaseline } from "./changes.js";
 import { TRAILING_CHANGE, exchangeIndexOf, hasUnwrittenMessages, linkedTranscript, pendingExchanges } from "./exchanges.js";
 import { isDesktopIdeRunning, profileOfStore } from "./ide-running.js";
 import {
@@ -74,9 +74,13 @@ export function createDesktopChats({
     return withReader((database) => listPendingRows(database, desktopWorkspaceId(directory)), null);
   }
 
+  function rowsForChat(directory, chatId) {
+    if (!chatId) return [];
+    return (pendingRows(directory) ?? []).filter((row) => row.chatId === chatId);
+  }
+
   function changes({ directory, chatId, ownChanges = {}, rowsToRemove = [] }) {
-    const rows = chatId ? (pendingRows(directory) ?? []).filter((row) => row.chatId === chatId) : [];
-    return conversationChanges({ ownChanges, rows, chat: read(chatId), rowsToRemove });
+    return conversationChanges({ ownChanges, rows: rowsForChat(directory, chatId), chat: read(chatId), rowsToRemove });
   }
 
   function transcript(session) {
@@ -95,16 +99,15 @@ export function createDesktopChats({
     if (!chatId || !rowsToRemove.length) return false;
     const queued = new Set(rowsToRemove);
     const chat = read(chatId);
-    return (pendingRows(directory) ?? []).some((row) =>
-      row.chatId === chatId
-      && queued.has(row.rowKey)
+    return rowsForChat(directory, chatId).some((row) =>
+      queued.has(row.rowKey)
       && changeParts(rowBaseline(row, chat), currentText(row.path)).length > 0);
   }
 
-  function unwrittenFileChanges(directory, session, exchanges, rowsToRemove) {
+  function unwrittenFileChanges(session, exchanges, open) {
     const writtenUpTo = session.desktopWritten ?? 0;
-    return changes({ directory, chatId: session.ideChatId, ownChanges: session.changes, rowsToRemove })
-      .filter((change) => change.own && !session.changes[change.path].desktopBubbleId)
+    return open
+      .filter((change) => change.fromSession && !session.changes[change.path].desktopBubbleId)
       .flatMap((change) => {
         const content = currentText(change.path);
         if (!changeParts(change.baseline, content).length) return [];
@@ -119,22 +122,29 @@ export function createDesktopChats({
     return left.length === right.length && left.every((line, index) => line === right[index]);
   }
 
-  function baselineRepairs(directory, session, rowsToRemove, fileChanges) {
+  function baselineRepairs(directory, open, fileChanges) {
     const covered = new Set(fileChanges.map((change) => change.rowKey).filter(Boolean));
     const rows = new Map((pendingRows(directory) ?? []).map((row) => [row.rowKey, row]));
-    return changes({ directory, chatId: session.ideChatId, ownChanges: session.changes, rowsToRemove })
-      .flatMap((change) => change.rowKeys.filter((rowKey) => !covered.has(rowKey)).flatMap((rowKey) => {
+    const repairs = [];
+    for (const change of open) {
+      const lines = baselineLines(change.baseline);
+      for (const rowKey of change.rowKeys) {
+        if (covered.has(rowKey)) continue;
         const row = rows.get(rowKey);
-        const lines = change.baseline.existed ? (change.baseline.content ?? "").split("\n") : [];
-        if (!row || sameLines(row.originalLines, lines)) return [];
-        return [{ rowKey, originalTextLines: lines }];
-      }));
+        if (!row || sameLines(row.originalLines, lines)) continue;
+        repairs.push({ rowKey, originalTextLines: lines });
+      }
+    }
+    return repairs;
   }
 
   function write(directory, session, { lastIsRunning = false, rowsToRemove = [] } = {}) {
     const exchanges = pendingExchanges(session.transcript, session.desktopWritten ?? 0, lastIsRunning);
-    const fileChanges = unwrittenFileChanges(directory, session, exchanges, rowsToRemove);
-    const repairs = session.ideChatId ? baselineRepairs(directory, session, rowsToRemove, fileChanges) : [];
+    const open = session.ideChatId
+      ? changes({ directory, chatId: session.ideChatId, ownChanges: session.changes, rowsToRemove })
+      : [];
+    const fileChanges = unwrittenFileChanges(session, exchanges, open);
+    const repairs = baselineRepairs(directory, open, fileChanges);
     if (!exchanges.length && !(session.ideChatId && fileChanges.length) && !repairs.length) return false;
     try {
       const written = withWriter((database) => {

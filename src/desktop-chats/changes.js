@@ -9,7 +9,7 @@ export function conversationChanges({ ownChanges, rows, chat, rowsToRemove }) {
       path,
       baseline: { existed: baseline.existed, content: baseline.content },
       touchedAt: baseline.touchedAt ?? 0,
-      own: true,
+      fromSession: true,
       rowKeys: [],
     });
     if (baseline.desktopDiffId) ownPathByDiff.set(baseline.desktopDiffId, path);
@@ -20,7 +20,7 @@ export function conversationChanges({ ownChanges, rows, chat, rowsToRemove }) {
       path: row.path,
       baseline: rowBaseline(row, chat),
       touchedAt: chat?.editTimes[row.toolCallId] ?? 0,
-      own: false,
+      fromSession: false,
       rowKeys: [row.rowKey],
     };
     const ownPath = ownPathByDiff.get(row.diffId);
@@ -47,6 +47,10 @@ export function conversationChanges({ ownChanges, rows, chat, rowsToRemove }) {
     });
   }
   return [...changes.values()];
+}
+
+export function baselineLines(baseline) {
+  return baseline.existed ? (baseline.content ?? "").split("\n") : [];
 }
 
 export function rowBaseline(row, chat) {
