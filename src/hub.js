@@ -22,13 +22,12 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
   const stateFile = join(dataDir, "state.json");
   const state = readJson(stateFile, { activeWorkspace: null, workspaces: {} });
   const listeners = new Set();
-  let runningSession = null;
-  let activity = null;
   let error = "";
   let connection = null;
   let agentProcess = null;
   let starting = null;
-  let waiter = null;
+  const runs = new Map();
+  const waits = new Map();
   let saveTimer = null;
   let lastPublished = "";
   const liveSessions = new Set();
@@ -73,8 +72,46 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     return workspace.sessions[workspace.activeSessionId] ?? null;
   }
 
-  function requireIdle() {
-    if (runningSession) throw new Error("A run is in progress.");
+  function requireSessionIdle(session) {
+    if (session && runs.has(session.id)) throw new Error("A run is in progress.");
+  }
+
+  function sessionStatus(id) {
+    if (waits.has(id)) return "waiting";
+    if (runs.has(id)) return "running";
+    return "idle";
+  }
+
+  function workspaceStatus(directory) {
+    const workspace = state.workspaces[directory];
+    if (!workspace) return "idle";
+    const statuses = Object.keys(workspace.sessions).map(sessionStatus);
+    if (statuses.includes("waiting")) return "waiting";
+    if (statuses.includes("running")) return "running";
+    return "idle";
+  }
+
+  function workspaceBusy(directory) {
+    return workspaceStatus(directory) !== "idle";
+  }
+
+  function sessionDirectory(session) {
+    if (!session) return null;
+    for (const [directory, workspace] of Object.entries(state.workspaces)) {
+      if (workspace.sessions[session.id]) return directory;
+    }
+    return null;
+  }
+
+  function sessionForRequest(params) {
+    const named = params?.sessionId ? findSession(params.sessionId) : null;
+    if (named) return named;
+    const ids = [...runs.keys()];
+    if (ids.length === 1) return findSession(ids[0]);
+    const open = activeSession();
+    const background = ids.filter((id) => id !== open?.id);
+    const target = background.at(-1) || ids.at(-1);
+    return target ? findSession(target) : null;
   }
 
   function guardCatalog() {
@@ -89,13 +126,18 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
       }
     }
     if (added) publish();
-    if (!state.activeWorkspace || catalog.has(state.activeWorkspace)) return;
-    if (runningSession) {
-      catalog.restore(state.activeWorkspace);
+    let restored = false;
+    for (const directory of Object.keys(state.workspaces)) {
+      if (!workspaceBusy(directory) || catalog.has(directory)) continue;
+      catalog.restore(directory);
+      restored = true;
       error = "That workspace has a run in progress.";
-    } else {
-      state.activeWorkspace = null;
     }
+    if (state.activeWorkspace && !catalog.has(state.activeWorkspace)) {
+      state.activeWorkspace = null;
+      restored = true;
+    }
+    if (!restored) return;
     saveNow();
     publish();
   }
@@ -129,7 +171,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     let changed = false;
     for (const [directory, workspace] of Object.entries(state.workspaces)) {
       for (const session of Object.values(workspace.sessions)) {
-        if (desktop.write(directory, session, { lastIsRunning: session === runningSession, rowsToRemove })) changed = true;
+        if (desktop.write(directory, session, { lastIsRunning: runs.has(session.id), rowsToRemove })) changed = true;
       }
     }
     if (rowsToRemove.length && desktop.removeRows(rowsToRemove)) {
@@ -175,7 +217,6 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     guardCatalog,
     syncDesktop,
     selectWorkspace(directory) {
-      requireIdle();
       if (!catalog.has(directory)) throw new Error("That directory is not in the catalog.");
       state.activeWorkspace = directory;
       workspaceRecord(directory);
@@ -199,12 +240,14 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
       await send(text, skillNames, false, null, files);
     },
     stop() {
-      if (!runningSession || !connection) return;
-      connection.cancel({ sessionId: runningSession.id }).catch(() => {});
-      finishWait({ outcome: { outcome: "cancelled" } });
+      const session = activeSession();
+      if (!session || !runs.has(session.id) || !connection) return;
+      connection.cancel({ sessionId: session.id }).catch(() => {});
+      finishWait(session.id, { outcome: { outcome: "cancelled" } });
     },
     answerPermission(decision) {
       const session = activeSession();
+      const waiter = session ? waits.get(session.id) : null;
       if (!waiter || waiter.kind !== "command") throw new Error("Nothing is waiting.");
       const optionKind = decision === "reject" ? "reject_once" : "allow_once";
       if (decision === "allow-session" && session) {
@@ -212,41 +255,44 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
         save();
       }
       const optionId = optionFor(waiter.options, optionKind);
-      finishWait({ outcome: { outcome: "selected", optionId } });
+      finishWait(session.id, { outcome: { outcome: "selected", optionId } });
     },
     answerQuestion(body) {
+      const session = activeSession();
+      const waiter = session ? waits.get(session.id) : null;
       if (!waiter || waiter.kind !== "question") throw new Error("Nothing is waiting.");
       if (waiter.source === "elicitation") {
-        finishWait(body.skip ? { action: "cancel" } : { action: "decline" });
+        finishWait(session.id, body.skip ? { action: "cancel" } : { action: "decline" });
         return;
       }
-      finishWait(body.skip
+      finishWait(session.id, body.skip
         ? { outcome: { outcome: "skipped" } }
         : { outcome: { outcome: "answered", answers: body.answers } });
     },
     answerPlan(accepted) {
+      const session = activeSession();
+      const waiter = session ? waits.get(session.id) : null;
       if (!waiter || waiter.kind !== "plan") throw new Error("Nothing is waiting.");
-      finishWait(accepted
+      finishWait(session.id, accepted
         ? { outcome: { outcome: "accepted" } }
         : { outcome: { outcome: "rejected" } });
     },
     setMode(mode) {
-      requireIdle();
       if (!MODES.includes(mode)) throw new Error("Unknown mode.");
       const workspace = activeWorkspace();
       if (!workspace) throw new Error("Choose a workspace first.");
       workspace.preferredMode = mode;
       const session = activeSession();
-      if (session) session.mode = mode;
+      if (session && !runs.has(session.id)) {
+        session.mode = mode;
+        if (connection) applyMode(session).catch(showError);
+      }
       saveNow();
       publish();
-      if (session && connection) {
-        applyMode(session).catch(showError);
-      }
     },
     async setModel(value) {
-      requireIdle();
       const session = activeSession();
+      requireSessionIdle(session);
       if (!session || !connection) throw new Error("Start a session first.");
       const option = modelOption(session.configOptions);
       if (!option) throw new Error("This session has no model choice.");
@@ -270,7 +316,6 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
       publish();
     },
     async openSession(id) {
-      requireIdle();
       const workspace = activeWorkspace();
       if (!workspace) throw new Error("Choose a workspace first.");
       if (id.startsWith("ide:")) {
@@ -306,8 +351,8 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
       }
     },
     change(file, action) {
-      requireIdle();
       const open = openConversation();
+      requireSessionIdle(open.session);
       const change = openChanges(open).find((candidate) => candidate.path === file);
       if (!change) throw new Error("That change is not open.");
       answerChange(open.session, change, action);
@@ -315,8 +360,8 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
       publish();
     },
     changeAll(action) {
-      requireIdle();
       const open = openConversation();
+      requireSessionIdle(open.session);
       for (const change of openChanges(open)) answerChange(open.session, change, action);
       saveNow();
       publish();
@@ -330,11 +375,13 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     if (session) ensureChangeMarks(session);
     const skills = listSkills(directory);
     const transcript = open.chat ? open.chat.messages : session ? desktop.transcript(session) : [];
+    const run = session ? runs.get(session.id) : null;
+    const waiter = session ? waits.get(session.id) : null;
     return {
       error,
-      running: Boolean(runningSession),
-      activity: runningSession ? (waiter ? null : activity || "Working") : null,
-      catalog: catalog.list(),
+      running: Boolean(run),
+      activity: run ? (waiter ? null : run.activity || "Working") : null,
+      catalog: catalog.list().map((entry) => ({ ...entry, status: workspaceStatus(entry.path) })),
       activeWorkspace: directory,
       activeSession: open.session
         ? open.session.id
@@ -345,6 +392,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
       transcript,
       desktopStatus: desktop.status({ directory, session, chatId: open.chatId, rowsToRemove: state.desktopRowsToRemove }),
       mode: session?.mode ?? workspace?.preferredMode ?? "agent",
+      preferredMode: workspace?.preferredMode ?? "agent",
       modes: MODES,
       model: session?.model ?? "Auto",
       models: modelChoices(session?.configOptions),
@@ -369,10 +417,11 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
       id: session.id,
       title: session.title || "New session",
       updatedAt: session.updatedAt || 0,
+      status: sessionStatus(session.id),
     }));
     return [...ide, ...own]
       .sort((left, right) => right.updatedAt - left.updatedAt)
-      .map(({ id, title }) => ({ id, title }));
+      .map(({ id, title, status }) => ({ id, title, status: status || "idle" }));
   }
 
   function shown(workspace, directory) {
@@ -413,7 +462,6 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
   }
 
   async function send(text, skillNames, fresh, prior, files) {
-    requireIdle();
     const directory = state.activeWorkspace;
     if (!directory) throw new Error("Choose a workspace first.");
     const attached = normalizeFiles(files);
@@ -422,6 +470,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     const workspace = workspaceRecord(directory);
     await ensureAgent();
     let session = fresh ? null : activeSession();
+    if (!fresh) requireSessionIdle(session);
     if (fresh) {
       const created = await connection.newSession({ cwd: directory, mcpServers: [] });
       session = {
@@ -455,8 +504,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     const blocks = promptBlocks(textPrompt, attached);
     append(session, "user", displayText(message, attached));
     session.updatedAt = Date.now();
-    runningSession = session;
-    activity = "Thinking";
+    runs.set(session.id, { activity: "Thinking" });
     error = "";
     saveNow();
     publish();
@@ -468,10 +516,10 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
       sessionId: session.id,
       prompt: blocks,
     }).catch(showError).finally(() => {
-      runningSession = null;
-      activity = null;
-      finishWait({ outcome: { outcome: "cancelled" } });
+      runs.delete(session.id);
+      finishWait(session.id, { outcome: { outcome: "cancelled" } });
       saveNow();
+      publish();
     });
   }
 
@@ -507,7 +555,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
       sessionUpdate,
       extMethod,
       async createElicitation(params) {
-        return waitFor({
+        return waitFor(sessionForRequest(params), {
           kind: "question",
           source: "elicitation",
           view: {
@@ -526,10 +574,9 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     agentProcess.on("exit", () => {
       connection = null;
       starting = null;
-      runningSession = null;
-      activity = null;
+      runs.clear();
       liveSessions.clear();
-      finishWait({ outcome: { outcome: "cancelled" } });
+      for (const id of [...waits.keys()]) finishWait(id, { outcome: { outcome: "cancelled" } });
       error = "The agent process stopped.";
       publish();
     });
@@ -548,12 +595,12 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
 
   function requestPermission(params) {
     const tool = params.toolCall;
-    const session = findSession(params.sessionId) ?? activeSession();
+    const session = findSession(params.sessionId) ?? sessionForRequest(params);
     if (session) trackMutations(session, tool);
     const described = commandKey(tool);
     if (!described) return allow(params.options);
     if (session?.allowances?.includes(described.key)) return allow(params.options);
-    return waitFor({
+    return waitFor(session, {
       kind: "command",
       key: described.key,
       options: params.options,
@@ -565,22 +612,22 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     const session = findSession(params.sessionId);
     if (!session) return;
     const update = params.update;
-    const answering = session === runningSession;
-    if (update.sessionUpdate === "agent_message_chunk" && answering) {
+    const run = runs.get(session.id);
+    if (update.sessionUpdate === "agent_message_chunk" && run) {
       const text = update.content?.type === "text" ? update.content.text : "";
       if (text) {
         append(session, "assistant", text);
-        activity = "Writing";
+        run.activity = "Writing";
       }
     }
-    if (update.sessionUpdate === "agent_thought_chunk" && answering) {
-      activity = "Thinking";
+    if (update.sessionUpdate === "agent_thought_chunk" && run) {
+      run.activity = "Thinking";
     }
     if (update.sessionUpdate === "user_message_chunk") return;
-    if ((update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") && answering) {
+    if ((update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") && run) {
       trackMutations(session, update);
       const done = update.status === "completed" || update.status === "failed" || update.status === "cancelled";
-      activity = done ? "Thinking" : activityLabel(update);
+      run.activity = done ? "Thinking" : activityLabel(update);
     }
     if (update.sessionUpdate === "current_mode_update" && update.modeId) {
       session.mode = String(update.modeId);
@@ -619,7 +666,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     const latest = [...session.transcript].reverse().find((message) => message.role === "change" && message.path === file);
     const removed = typeof prior === "string" ? prior : existing?.existed ? existing.content : currentText(file);
     if (latest?.action !== "delete") {
-      if (existing?.desktopDiffId) queueRemovedRow(existing.desktopDiffId);
+      if (existing?.desktopDiffId) queueRemovedRow(session, existing.desktopDiffId);
       session.transcript.push({ role: "change", path: file, action: "delete" });
     }
     const alreadyWritten = latest?.action === "delete" && existing?.desktopBubbleId;
@@ -631,8 +678,8 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     };
   }
 
-  function queueRemovedRow(diffId) {
-    const directory = state.activeWorkspace;
+  function queueRemovedRow(session, diffId) {
+    const directory = sessionDirectory(session);
     if (!directory) return;
     const row = (desktop.pendingRows(directory) ?? []).find((candidate) => candidate.diffId === diffId);
     if (row) queueRowKeys([row.rowKey]);
@@ -640,7 +687,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
 
   function extMethod(method, params) {
     if (method === "cursor/ask_question") {
-      return waitFor({
+      return waitFor(sessionForRequest(params), {
         kind: "question",
         source: "cursor",
         view: {
@@ -651,7 +698,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
       });
     }
     if (method === "cursor/create_plan") {
-      return waitFor({
+      return waitFor(sessionForRequest(params), {
         kind: "plan",
         view: {
           kind: "plan",
@@ -663,18 +710,20 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     return {};
   }
 
-  function waitFor(pending) {
-    if (waiter) finishWait({ outcome: { outcome: "cancelled" } });
+  function waitFor(session, pending) {
+    if (!session) return Promise.resolve({ outcome: { outcome: "cancelled" } });
+    finishWait(session.id, { outcome: { outcome: "cancelled" } });
     return new Promise((resolve) => {
-      waiter = { ...pending, resolve };
+      waits.set(session.id, { ...pending, resolve });
       publish();
     });
   }
 
-  function finishWait(value) {
-    const current = waiter;
-    waiter = null;
-    current?.resolve(value);
+  function finishWait(sessionId, value) {
+    const current = waits.get(sessionId);
+    if (!current) return;
+    waits.delete(sessionId);
+    current.resolve(value);
     publish();
   }
 
