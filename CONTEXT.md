@@ -32,6 +32,14 @@ _Avoid_: new chat, task
 A user message sent into a session that already exists, or into a desktop chat the client is continuing.
 _Avoid_: reply, another prompt
 
+**Queued follow-up**:
+A follow-up waiting to be sent into a session that already has a run in progress.
+_Avoid_: draft, outbox, queue
+
+**Send now**:
+Sending one queued follow-up immediately. A run still in progress on that session stops first.
+_Avoid_: force send, interrupt
+
 **Run**:
 The work a session does after a prompt or follow-up, until it finishes or is cancelled.
 _Avoid_: turn, job, task
@@ -144,13 +152,17 @@ _Avoid_: engine, LLM
 - A **Workspace** with a **Run** in progress cannot be removed from the **Catalog**.
 - A **Workspace** keeps its past **Sessions**. Exactly one of them is on screen.
 - A **Prompt** starts a **Session** and makes it the one on screen. The previous **Session** stays readable, including while a **Run** is in progress.
-- A **Follow-up** belongs to the **Session** on screen. It is refused while that **Session**'s **Run** is in progress.
+- A **Follow-up** belongs to the **Session** on screen. While that **Session**'s **Run** is in progress, including while it is waiting on a **Pending command**, an **Agent question**, or a **Plan**, the **Follow-up** becomes a **Queued follow-up**. It stays on that **Session** when another **Session** is opened. It is not in the **Transcript** yet.
+- A **Session** can have several **Queued follow-ups**, in the order they were sent. When a **Run** finishes on its own, the oldest one still waiting is sent. **Send now** sends one **Queued follow-up** immediately, and stops that **Run** first if it is still in progress. The others stay queued. A **Pending command**, **Agent question**, or **Plan** that was waiting is dropped, because **Send now** stops the **Run**.
+- A **Run** the agent does not finish leaves every **Queued follow-up** where it is. That includes an error, **Stop**, and the agent process dying.
+- A **Queued follow-up** can be removed, or its text changed, before it is sent. It keeps its place, and it keeps the **Attachments** and **File attachments** it was given. The **Run** keeps going.
+- **Stop** ends the **Run** and leaves every **Queued follow-up** where it is. Nothing sends until **Send now**, or until a later **Run** finishes on its own.
 - A **Run** belongs to one **Session**. Opening another **Session**, or another **Workspace**, does not stop it. The **Client** shows that a **Session** or **Workspace** is thinking, or waiting for an answer.
 - A **Session** has one **Mode**. It can be changed only while that **Session**'s **Run** is not in progress, and a **Follow-up** keeps it.
 - A **Session** has one **Model**. A new **Session** starts on Auto. The model can be changed only while that **Session**'s **Run** is not in progress, and a **Follow-up** keeps it.
 - In plan or ask **Mode**, a **Run** does not create **Changes** and does not raise **Pending commands**.
-- **Stop** ends the **Run** of the **Session** on screen. A **Pending command**, **Agent question**, or **Plan** that was still waiting on that **Run** is dropped. Open **Changes** already made stay open. That **Session** is then idle. Another **Run** keeps going.
-- A **Workspace**'s **Sessions**, their **Transcripts**, and their open **Changes** survive a restart of the process on this PC. A **Run** that was in progress at the restart is stopped.
+- **Stop** ends the **Run** of the **Session** on screen. A **Pending command**, **Agent question**, or **Plan** that was still waiting on that **Run** is dropped. Open **Changes** already made stay open. That **Session** is then idle, and its **Queued follow-ups** stay queued. Another **Run** keeps going.
+- A **Workspace**'s **Sessions**, their **Transcripts**, their **Queued follow-ups**, and their open **Changes** survive a restart of the process on this PC. A **Run** that was in progress at the restart is stopped, so a **Queued follow-up** is not sent by the restart.
 - A **Change** belongs to exactly one **Session** or **Desktop chat**. A **Session** that continues a **Desktop chat** shares its **Changes** with that chat. A new **Session** that continues nothing starts with no open changes.
 - A file has at most one open **Change** in a conversation. When both sides touched it, its baseline is the earliest one.
 - Open **Changes** stay on the **Session** that made them when another **Session** becomes active.
@@ -185,7 +197,7 @@ _Avoid_: engine, LLM
 > **Domain expert:** "Yes. One **Workspace** is on screen. A **Run** in another **Workspace** keeps going. Switch there, send a message, and switch back. The list shows which one is thinking, or waiting for an answer."
 >
 > **Dev:** "The refactor is done. I want an unrelated change in the same workspace."
-> **Domain expert:** "Send a **Prompt**. That starts a new **Session**. The refactor **Session** stays in the list, and you can open it while the new **Run** is in progress. A **Follow-up** would have continued the refactor instead, and waits until that **Session**'s **Run** is idle."
+> **Domain expert:** "Send a **Prompt**. That starts a new **Session**. The refactor **Session** stays in the list, and you can open it while the new **Run** is in progress. A **Follow-up** would have continued the refactor instead. While that **Run** is in progress, it waits as a **Queued follow-up** and is sent when the **Run** finishes."
 >
 > **Dev:** "`api.ts` already had my edits. The agent changed `api.ts` and `readme.md`. I undo only `api.ts`, then start a new session."
 > **Domain expert:** "`api.ts` goes back to your edits. `readme.md` stays an open **Change** on the old **Session**. The new **Session** starts with no open changes. Reopen the old one to **Accept** or **Undo** `readme.md`."
