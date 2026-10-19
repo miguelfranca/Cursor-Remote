@@ -353,6 +353,7 @@ export function clientPage() {
       border-color: #333;
     }
     .choice-label { overflow-wrap: anywhere; }
+    .choice-notes { display: flex; gap: 0.35rem; flex: 0 0 auto; }
     .current {
       flex: 0 0 auto;
       padding: 0.12rem 0.45rem;
@@ -1044,53 +1045,68 @@ function browserClient() {
     box.style.height = `${Math.min(box.scrollHeight, window.innerHeight * 0.28)}px`;
   }
 
+  function runLabel(status) {
+    if (status === "waiting") return "Waiting";
+    if (status === "running") return "Thinking";
+    return "";
+  }
+
   function render(next) {
     state = next;
-    const running = Boolean(next.running);
+    const openRunning = Boolean(next.running);
+    const composerLocked = openRunning && !composingNew;
     $("error").hidden = !next.error;
     $("error").textContent = next.error || "";
-    $("send").hidden = running;
-    $("stop").hidden = !running;
+    $("send").hidden = composerLocked;
+    $("stop").hidden = !openRunning || composingNew || next.stoppable === false;
     const status = $("run-status");
     const statusLabel = $("run-status-label");
-    status.hidden = !running || Boolean(next.pending);
+    status.hidden = !composerLocked || Boolean(next.pending);
     statusLabel.textContent = next.activity || "Working";
-    $("attach").disabled = running;
-    $("file").disabled = running;
-    $("text").disabled = running;
+    $("attach").disabled = composerLocked;
+    $("file").disabled = composerLocked;
+    $("text").disabled = composerLocked;
     renderAttachments();
     const newChatLabel = composingNew ? "Back to chat" : "New chat";
     $("new-chat").hidden = !next.activeWorkspace || (next.sessions.length === 0 && !composingNew);
-    $("new-chat").disabled = running;
+    $("new-chat").disabled = false;
     $("new-chat-label").textContent = newChatLabel;
     $("new-chat").setAttribute("aria-label", newChatLabel);
     $("new-chat").querySelector("svg").hidden = composingNew;
     $("accept-all").disabled = next.running;
     $("undo-all").disabled = next.running;
     $("bulk-change-actions").hidden = next.changes.length === 0;
-    $("changes-note").hidden = !running || next.changes.length === 0;
+    $("changes-note").hidden = !openRunning || next.changes.length === 0;
 
     const active = next.catalog.find((entry) => entry.path === next.activeWorkspace);
     const title = $("workspace-title");
     title.textContent = active ? active.name : "";
     title.hidden = !active;
 
-    $("model-label").textContent = modelName(next);
-    $("model-open").disabled = running || (next.models || []).length === 0;
+    $("model-label").textContent = composingNew ? "Auto" : modelName(next);
+    $("model-open").disabled = openRunning || composingNew || (next.models || []).length === 0;
 
     $("catalog").innerHTML = next.catalog.map((entry) => {
       const current = entry.path === next.activeWorkspace;
+      const note = runLabel(entry.status);
       return `<button type="button" data-workspace="${esc(entry.path)}"${current ? ' aria-current="page"' : ""}>
         <span class="choice-label">${esc(entry.name)}</span>
-        ${current ? '<span class="current">Current</span>' : ""}
+        <span class="choice-notes">
+          ${note ? `<span class="current">${esc(note)}</span>` : ""}
+          ${current ? '<span class="current">Current</span>' : ""}
+        </span>
       </button>`;
     }).join("") || '<p class="empty">Open a folder in Cursor on this PC.</p>';
 
     $("sessions").innerHTML = next.sessions.map((session) => {
-      const current = session.id === next.activeSession;
+      const current = session.id === next.activeSession && !composingNew;
+      const note = runLabel(session.status);
       return `<button type="button" data-session="${esc(session.id)}"${current ? ' aria-current="page"' : ""}>
         <span class="choice-label">${esc(session.title)}</span>
-        ${current ? '<span class="current">Current</span>' : ""}
+        <span class="choice-notes">
+          ${note ? `<span class="current">${esc(note)}</span>` : ""}
+          ${current ? '<span class="current">Current</span>' : ""}
+        </span>
       </button>`;
     }).join("") || (active ? '<p class="empty">No chats yet.</p>' : "");
 
@@ -1120,7 +1136,7 @@ function browserClient() {
           ${body}
         </article>`;
       }).join("") || (active ? '<p class="hint">Send a message.</p>' : '<p class="hint">Choose a workspace to begin.</p>');
-    const activity = running && !next.pending && next.activity
+    const activity = composerLocked && !next.pending && next.activity
       ? `<div class="activity" role="status" aria-live="polite">
           <span class="spinner" aria-hidden="true"></span>
           <span class="activity-dots">${esc(next.activity)}</span>
@@ -1135,16 +1151,17 @@ function browserClient() {
       : "";
     $("transcript").innerHTML = transcript + activity + desktopNote;
 
+    const shownMode = composingNew ? (next.preferredMode || next.mode) : next.mode;
     $("mode").innerHTML = next.modes.map((mode) =>
-      `<option ${mode === next.mode ? "selected" : ""}>${esc(mode)}</option>`
+      `<option ${mode === shownMode ? "selected" : ""}>${esc(mode)}</option>`
     ).join("");
-    $("mode").disabled = next.running;
+    $("mode").disabled = openRunning && !composingNew;
     $("model").innerHTML = next.models.map((model) =>
       `<option value="${esc(model.value)}" ${model.selected ? "selected" : ""}>${esc(model.name)}</option>`
     ).join("") || `<option>${esc(next.model)}</option>`;
-    $("model").disabled = next.running || next.models.length === 0;
+    $("model").disabled = openRunning || composingNew || next.models.length === 0;
     $("model-list").innerHTML = (next.models.length ? next.models : [{ value: next.model, name: next.model || "Auto", selected: true }]).map((model) =>
-      `<button type="button" data-model="${esc(model.value)}"${model.selected ? ' aria-current="true"' : ""} ${next.running ? "disabled" : ""}>
+      `<button type="button" data-model="${esc(model.value)}"${model.selected ? ' aria-current="true"' : ""} ${openRunning || composingNew ? "disabled" : ""}>
         <span class="choice-label">${esc(model.name)}</span>
         ${model.selected ? '<span class="current">Current</span>' : ""}
       </button>`
@@ -1169,7 +1186,7 @@ function browserClient() {
       </article>`
     ).join("") || '<p class="empty">No skills available.</p>';
 
-    $("pending").innerHTML = pendingMarkup(next);
+    $("pending").innerHTML = composingNew ? "" : pendingMarkup(next);
 
     const count = next.changes.length;
     const countLabel = count === 1 ? "1 open" : count > 1 ? `${count} open` : "";
@@ -1373,7 +1390,7 @@ function browserClient() {
   async function sendMessage() {
     const text = $("text").value;
     if (!text.trim() && pendingFiles.length === 0) return;
-    if (!state || state.running) return;
+    if (!state || (state.running && !composingNew)) return;
     const fresh = composingNew || !state.activeSession;
     const files = pendingFiles;
     const skills = selectedSkills();
@@ -1388,6 +1405,7 @@ function browserClient() {
       ...previous,
       error: "",
       running: true,
+      stoppable: fresh ? false : previous.stoppable,
       activity: "Working",
       pending: null,
       transcript: fresh

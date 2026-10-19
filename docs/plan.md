@@ -6,7 +6,7 @@ The signed-in page, Tailscale, and the Cursor CLI are already done. See `docs/se
 
 ## 1. Catalog
 
-The page lists the directories the agent is allowed to run in. The list starts empty. You add and remove directories on this PC, not from the phone. Removing one hides it and keeps its sessions and open changes. You cannot remove the active workspace while a run is in progress.
+The page lists the directories the agent is allowed to run in. The list starts empty. You add and remove directories on this PC, not from the phone. Removing one hides it and keeps its sessions and open changes. You cannot remove a workspace while one of its runs is in progress.
 
 Done when the phone shows only the directories you added, and a directory you have not added cannot be selected.
 
@@ -56,6 +56,6 @@ Done when a skill attached to a prompt is absent from the next follow-up, and a 
 
 ## 9. Past sessions
 
-Each workspace keeps its past sessions. You open one only while no run is in progress. Opening it shows its transcript and its open changes.
+Each workspace keeps its past sessions. You can open one while another run is in progress. Opening it shows its transcript and its open changes.
 
 Done when a new prompt leaves the old session readable, and reopening the old one still offers its open changes.

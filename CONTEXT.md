@@ -142,20 +142,20 @@ _Avoid_: engine, LLM
 - The **Catalog** lists every folder the **Desktop IDE** has opened, and any directory added on this PC. The client cannot activate a directory outside the catalog. A folder opened in the **Desktop IDE** is listed again if it was removed.
 - Removing a **Workspace** from the **Catalog** hides it from the **Client**. Its **Sessions**, **Transcripts**, and open **Changes** remain, and adding it back shows them again.
 - A **Workspace** with a **Run** in progress cannot be removed from the **Catalog**.
-- A **Workspace** keeps its past **Sessions**. Exactly one of them is active.
-- A **Prompt** starts a **Session** and makes it the active one. The previous **Session** stays readable.
-- A **Follow-up** belongs to the active **Session**.
-- A **Run** belongs to one **Session**. While a **Run** is in progress, the active **Workspace** and the active **Session** stay fixed.
-- A **Session** has one **Mode**. It can be changed only while no **Run** is in progress, and a **Follow-up** keeps it.
-- A **Session** has one **Model**. A new **Session** starts on Auto. The model can be changed only while no **Run** is in progress, and a **Follow-up** keeps it.
+- A **Workspace** keeps its past **Sessions**. Exactly one of them is on screen.
+- A **Prompt** starts a **Session** and makes it the one on screen. The previous **Session** stays readable, including while a **Run** is in progress.
+- A **Follow-up** belongs to the **Session** on screen. It is refused while that **Session**'s **Run** is in progress.
+- A **Run** belongs to one **Session**. Opening another **Session**, or another **Workspace**, does not stop it. The **Client** shows that a **Session** or **Workspace** is thinking, or waiting for an answer.
+- A **Session** has one **Mode**. It can be changed only while that **Session**'s **Run** is not in progress, and a **Follow-up** keeps it.
+- A **Session** has one **Model**. A new **Session** starts on Auto. The model can be changed only while that **Session**'s **Run** is not in progress, and a **Follow-up** keeps it.
 - In plan or ask **Mode**, a **Run** does not create **Changes** and does not raise **Pending commands**.
-- **Stop** ends that **Run**. A **Pending command**, **Agent question**, or **Plan** that was still waiting is dropped. Open **Changes** already made stay open. The session is then idle.
+- **Stop** ends the **Run** of the **Session** on screen. A **Pending command**, **Agent question**, or **Plan** that was still waiting on that **Run** is dropped. Open **Changes** already made stay open. That **Session** is then idle. Another **Run** keeps going.
 - A **Workspace**'s **Sessions**, their **Transcripts**, and their open **Changes** survive a restart of the process on this PC. A **Run** that was in progress at the restart is stopped.
 - A **Change** belongs to exactly one **Session** or **Desktop chat**. A **Session** that continues a **Desktop chat** shares its **Changes** with that chat. A new **Session** that continues nothing starts with no open changes.
 - A file has at most one open **Change** in a conversation. When both sides touched it, its baseline is the earliest one.
 - Open **Changes** stay on the **Session** that made them when another **Session** becomes active.
 - **Accept** and **Undo** apply to one **Change**, or to every open **Change** of a **Session** or **Desktop chat**.
-- An open **Change** can be read during a **Run**, including its difference from the baseline. **Accept** and **Undo** apply only while no **Run** is in progress.
+- An open **Change** can be read during a **Run**, including its difference from the baseline. **Accept** and **Undo** apply only while that **Session**'s **Run** is not in progress.
 - The **Transcript** marks when the agent first touches a file that becomes a **Change**, so the history shows where edits happened in the conversation.
 - **Undo** of a created file removes it. **Undo** of a deleted file writes the previous contents back. **Accept** keeps the creation or the deletion.
 - A **Pending command** belongs to a **Run**. File reads and file edits are not pending commands. A file edit is a **Change**.
@@ -182,10 +182,10 @@ _Avoid_: engine, LLM
 > **Domain expert:** "No. The phone talks to the **Local agent**'s **Session**. The **Desktop IDE** is a separate conversation."
 >
 > **Dev:** "Can two workspaces run at once?"
-> **Domain expert:** "No. One **Workspace** is active, and it has one active **Session**. Switching shows that workspace's session instead."
+> **Domain expert:** "Yes. One **Workspace** is on screen. A **Run** in another **Workspace** keeps going. Switch there, send a message, and switch back. The list shows which one is thinking, or waiting for an answer."
 >
 > **Dev:** "The refactor is done. I want an unrelated change in the same workspace."
-> **Domain expert:** "Send a **Prompt**. That starts a new **Session**. The refactor **Session** stays in the list. A **Follow-up** would have continued the refactor instead. You can open the old one again only while no **Run** is in progress."
+> **Domain expert:** "Send a **Prompt**. That starts a new **Session**. The refactor **Session** stays in the list, and you can open it while the new **Run** is in progress. A **Follow-up** would have continued the refactor instead, and waits until that **Session**'s **Run** is idle."
 >
 > **Dev:** "`api.ts` already had my edits. The agent changed `api.ts` and `readme.md`. I undo only `api.ts`, then start a new session."
 > **Domain expert:** "`api.ts` goes back to your edits. `readme.md` stays an open **Change** on the old **Session**. The new **Session** starts with no open changes. Reopen the old one to **Accept** or **Undo** `readme.md`."
