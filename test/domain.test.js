@@ -10,7 +10,19 @@ import { ideProjectDirectories } from "../src/ide-projects.js";
 import { currentText, remember, repairBaseline, restore } from "../src/changes.js";
 import { activityLabel, commandKey, isFileMutation, mutationAction, pathsFromTool, priorFromTool } from "../src/command-key.js";
 import { changeParts, diffParts, unifiedDiff } from "../src/diff.js";
+import { queueAfterRun } from "../src/hub.js";
 import { renderMarkdown } from "../src/markdown.js";
+
+test("a finished turn sends the next queued follow-up, and stop or an error does not", () => {
+  assert.equal(queueAfterRun({ stopReason: "end_turn" }), "send-next");
+  assert.equal(queueAfterRun({ stopReason: "end_turn", stopped: true }), "keep");
+  assert.equal(queueAfterRun({ stopReason: "cancelled", stopped: true }), "keep");
+  assert.equal(queueAfterRun({ failed: true }), "keep");
+  assert.equal(queueAfterRun({ stopReason: "refusal" }), "keep");
+  assert.equal(queueAfterRun({ stopReason: "max_tokens" }), "keep");
+  assert.equal(queueAfterRun(null), "keep");
+  assert.equal(queueAfterRun({ stopped: true, sendNowId: "one", stopReason: "cancelled" }), "send-now");
+});
 
 test("catalog starts empty and only lists added directories", () => {
   const root = mkdtempSync(join(tmpdir(), "catalog-"));

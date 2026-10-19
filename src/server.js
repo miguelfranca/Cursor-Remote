@@ -83,6 +83,9 @@ async function route(request, response) {
   if (url.pathname === "/workspace") hub.selectWorkspace(body.path);
   else if (url.pathname === "/prompt") await hub.prompt(body.text ?? "", body.skills ?? [], body.files ?? []);
   else if (url.pathname === "/follow-up") await hub.followUp(body.text ?? "", body.skills ?? [], body.files ?? []);
+  else if (url.pathname === "/send-now") await hub.sendNow(body.id);
+  else if (url.pathname === "/queue") hub.editQueued(body.id, body.text ?? "");
+  else if (url.pathname === "/queue-remove") hub.removeQueued(body.id);
   else if (url.pathname === "/stop") hub.stop();
   else if (url.pathname === "/permission") hub.answerPermission(body.decision);
   else if (url.pathname === "/question") hub.answerQuestion(body);

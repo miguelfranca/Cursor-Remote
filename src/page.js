@@ -353,6 +353,7 @@ export function clientPage() {
       border-color: #333;
     }
     .choice-label { overflow-wrap: anywhere; }
+    .choice-notes { display: flex; gap: 0.35rem; flex: 0 0 auto; }
     .current {
       flex: 0 0 auto;
       padding: 0.12rem 0.45rem;
@@ -632,6 +633,58 @@ export function clientPage() {
       padding: 0.35rem 0.85rem max(0.85rem, env(safe-area-inset-bottom));
       background: transparent;
     }
+    .queue {
+      display: grid;
+      gap: 0.45rem;
+    }
+    .queue[hidden] { display: none !important; }
+    .queue-item {
+      display: grid;
+      gap: 0.4rem;
+      padding: 0.7rem 0.8rem;
+      border: 1px solid #333;
+      border-radius: 1rem;
+      background: var(--surface-2);
+    }
+    .queue-text {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .queue-note { margin: 0; color: var(--muted); font-size: 0.85rem; }
+    .queue-toggle {
+      justify-self: start;
+      min-height: 0;
+      padding: 0.1rem 0;
+      border: 0;
+      background: transparent;
+      color: var(--muted);
+      font-size: 0.82rem;
+      font-weight: 650;
+    }
+    .queue-actions { display: flex; flex-wrap: wrap; gap: 0.85rem; }
+    .queue-actions button {
+      min-height: 0;
+      padding: 0.1rem 0;
+      border: 0;
+      background: transparent;
+      color: var(--muted);
+      font-size: 0.82rem;
+      font-weight: 650;
+    }
+    .queue-item textarea {
+      width: 100%;
+      min-height: 4.5rem;
+      max-height: 28vh;
+      resize: vertical;
+      padding: 0.65rem 0.7rem;
+      border: 1px solid #444;
+      border-radius: 0.8rem;
+      background: var(--surface);
+      color: var(--text);
+      font-size: 1rem;
+      line-height: 1.4;
+    }
     .attachments {
       display: flex;
       flex-wrap: wrap;
@@ -662,10 +715,19 @@ export function clientPage() {
     .composer-row {
       display: flex;
       align-items: flex-end;
-      gap: 0.55rem;
+      gap: 0.4rem;
+      width: 100%;
+      min-width: 0;
+    }
+    .composer-actions {
+      display: flex;
+      flex: 0 0 auto;
+      align-items: flex-end;
+      gap: 0.35rem;
     }
     .pill {
-      flex: 1 1 auto;
+      flex: 1 1 0;
+      min-width: 0;
       display: flex;
       align-items: flex-end;
       gap: 0.15rem;
@@ -691,8 +753,9 @@ export function clientPage() {
       line-height: 1;
     }
     .pill textarea {
-      flex: 1 1 auto;
-      width: auto;
+      flex: 1 1 0;
+      width: 0;
+      min-width: 0;
       min-height: 2.4rem;
       max-height: 28vh;
       resize: none;
@@ -707,10 +770,10 @@ export function clientPage() {
     .pill textarea::placeholder { color: var(--muted); }
     .send-circle {
       flex: 0 0 auto;
-      width: 3.25rem;
-      min-width: 3.25rem;
-      height: 3.25rem;
-      min-height: 3.25rem;
+      width: 2.75rem;
+      min-width: 2.75rem;
+      height: 2.75rem;
+      min-height: 2.75rem;
       padding: 0;
       border: 0;
       border-radius: 50%;
@@ -892,6 +955,7 @@ export function clientPage() {
   <div class="dock">
     <section id="pending" aria-live="polite"></section>
     <div class="composer">
+      <div id="queue" class="queue" hidden></div>
       <p id="run-status" class="run-status" role="status" hidden>
         <span class="spinner" aria-hidden="true"></span>
         <span id="run-status-label" class="activity-dots">Working</span>
@@ -904,12 +968,14 @@ export function clientPage() {
           <label class="sr-only" for="text">Message</label>
           <textarea id="text" rows="1" placeholder="Message"></textarea>
         </div>
-        <button id="send" class="send-circle" type="button" aria-label="Send">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3.4 20.6 21 12 3.4 3.4 3.3 10l11 2-11 2z"/></svg>
-        </button>
-        <button id="stop" class="send-circle is-stop" type="button" aria-label="Stop" hidden>
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M7 7h10v10H7z"/></svg>
-        </button>
+        <div class="composer-actions">
+          <button id="send" class="send-circle" type="button" aria-label="Send">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3.4 20.6 21 12 3.4 3.4 3.3 10l11 2-11 2z"/></svg>
+          </button>
+          <button id="stop" class="send-circle is-stop" type="button" aria-label="Stop" hidden>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M7 7h10v10H7z"/></svg>
+          </button>
+        </div>
       </div>
     </div>
   </div>
@@ -947,6 +1013,9 @@ function browserClient() {
   let state = null;
   let composingNew = false;
   let pendingFiles = [];
+  let editingQueueId = null;
+  let queueCollapsed = false;
+  let queueSignature = "";
   let openOverlay = null;
   let selectedChangePath = null;
   let expandedGaps = new Set();
@@ -1044,53 +1113,69 @@ function browserClient() {
     box.style.height = `${Math.min(box.scrollHeight, window.innerHeight * 0.28)}px`;
   }
 
+  function runLabel(status) {
+    if (status === "waiting") return "Waiting";
+    if (status === "running") return "Thinking";
+    return "";
+  }
+
   function render(next) {
     state = next;
-    const running = Boolean(next.running);
+    const openRunning = Boolean(next.running);
+    const showRun = openRunning && !composingNew;
     $("error").hidden = !next.error;
     $("error").textContent = next.error || "";
-    $("send").hidden = running;
-    $("stop").hidden = !running;
+    $("send").hidden = false;
+    $("stop").hidden = !showRun || next.stoppable === false;
     const status = $("run-status");
     const statusLabel = $("run-status-label");
-    status.hidden = !running || Boolean(next.pending);
+    status.hidden = !showRun || Boolean(next.pending);
     statusLabel.textContent = next.activity || "Working";
-    $("attach").disabled = running;
-    $("file").disabled = running;
-    $("text").disabled = running;
+    $("attach").disabled = false;
+    $("file").disabled = false;
+    $("text").disabled = false;
     renderAttachments();
+    renderQueue(composingNew ? [] : next.queue || []);
     const newChatLabel = composingNew ? "Back to chat" : "New chat";
     $("new-chat").hidden = !next.activeWorkspace || (next.sessions.length === 0 && !composingNew);
-    $("new-chat").disabled = running;
+    $("new-chat").disabled = false;
     $("new-chat-label").textContent = newChatLabel;
     $("new-chat").setAttribute("aria-label", newChatLabel);
     $("new-chat").querySelector("svg").hidden = composingNew;
     $("accept-all").disabled = next.running;
     $("undo-all").disabled = next.running;
     $("bulk-change-actions").hidden = next.changes.length === 0;
-    $("changes-note").hidden = !running || next.changes.length === 0;
+    $("changes-note").hidden = !openRunning || next.changes.length === 0;
 
     const active = next.catalog.find((entry) => entry.path === next.activeWorkspace);
     const title = $("workspace-title");
     title.textContent = active ? active.name : "";
     title.hidden = !active;
 
-    $("model-label").textContent = modelName(next);
-    $("model-open").disabled = running || (next.models || []).length === 0;
+    $("model-label").textContent = composingNew ? "Auto" : modelName(next);
+    $("model-open").disabled = openRunning || composingNew || (next.models || []).length === 0;
 
     $("catalog").innerHTML = next.catalog.map((entry) => {
       const current = entry.path === next.activeWorkspace;
+      const note = runLabel(entry.status);
       return `<button type="button" data-workspace="${esc(entry.path)}"${current ? ' aria-current="page"' : ""}>
         <span class="choice-label">${esc(entry.name)}</span>
-        ${current ? '<span class="current">Current</span>' : ""}
+        <span class="choice-notes">
+          ${note ? `<span class="current">${esc(note)}</span>` : ""}
+          ${current ? '<span class="current">Current</span>' : ""}
+        </span>
       </button>`;
     }).join("") || '<p class="empty">Open a folder in Cursor on this PC.</p>';
 
     $("sessions").innerHTML = next.sessions.map((session) => {
-      const current = session.id === next.activeSession;
+      const current = session.id === next.activeSession && !composingNew;
+      const note = runLabel(session.status);
       return `<button type="button" data-session="${esc(session.id)}"${current ? ' aria-current="page"' : ""}>
         <span class="choice-label">${esc(session.title)}</span>
-        ${current ? '<span class="current">Current</span>' : ""}
+        <span class="choice-notes">
+          ${note ? `<span class="current">${esc(note)}</span>` : ""}
+          ${current ? '<span class="current">Current</span>' : ""}
+        </span>
       </button>`;
     }).join("") || (active ? '<p class="empty">No chats yet.</p>' : "");
 
@@ -1120,7 +1205,7 @@ function browserClient() {
           ${body}
         </article>`;
       }).join("") || (active ? '<p class="hint">Send a message.</p>' : '<p class="hint">Choose a workspace to begin.</p>');
-    const activity = running && !next.pending && next.activity
+    const activity = showRun && !next.pending && next.activity
       ? `<div class="activity" role="status" aria-live="polite">
           <span class="spinner" aria-hidden="true"></span>
           <span class="activity-dots">${esc(next.activity)}</span>
@@ -1135,16 +1220,17 @@ function browserClient() {
       : "";
     $("transcript").innerHTML = transcript + activity + desktopNote;
 
+    const shownMode = composingNew ? (next.preferredMode || next.mode) : next.mode;
     $("mode").innerHTML = next.modes.map((mode) =>
-      `<option ${mode === next.mode ? "selected" : ""}>${esc(mode)}</option>`
+      `<option ${mode === shownMode ? "selected" : ""}>${esc(mode)}</option>`
     ).join("");
-    $("mode").disabled = next.running;
+    $("mode").disabled = openRunning && !composingNew;
     $("model").innerHTML = next.models.map((model) =>
       `<option value="${esc(model.value)}" ${model.selected ? "selected" : ""}>${esc(model.name)}</option>`
     ).join("") || `<option>${esc(next.model)}</option>`;
-    $("model").disabled = next.running || next.models.length === 0;
+    $("model").disabled = openRunning || composingNew || next.models.length === 0;
     $("model-list").innerHTML = (next.models.length ? next.models : [{ value: next.model, name: next.model || "Auto", selected: true }]).map((model) =>
-      `<button type="button" data-model="${esc(model.value)}"${model.selected ? ' aria-current="true"' : ""} ${next.running ? "disabled" : ""}>
+      `<button type="button" data-model="${esc(model.value)}"${model.selected ? ' aria-current="true"' : ""} ${openRunning || composingNew ? "disabled" : ""}>
         <span class="choice-label">${esc(model.name)}</span>
         ${model.selected ? '<span class="current">Current</span>' : ""}
       </button>`
@@ -1169,7 +1255,7 @@ function browserClient() {
       </article>`
     ).join("") || '<p class="empty">No skills available.</p>';
 
-    $("pending").innerHTML = pendingMarkup(next);
+    $("pending").innerHTML = composingNew ? "" : pendingMarkup(next);
 
     const count = next.changes.length;
     const countLabel = count === 1 ? "1 open" : count > 1 ? `${count} open` : "";
@@ -1298,6 +1384,24 @@ function browserClient() {
         renderAttachments();
       } else if (target.id === "send") await sendMessage();
       else if (target.id === "stop") await post("/stop");
+      else if (target.hasAttribute("data-queue-toggle")) {
+        queueCollapsed = !queueCollapsed;
+        if (queueCollapsed) editingQueueId = null;
+        queueSignature = "";
+        if (state) render(state);
+      } else if (target.dataset.sendNow) await post("/send-now", { id: target.dataset.sendNow });
+      else if (target.dataset.queueRemove) await post("/queue-remove", { id: target.dataset.queueRemove });
+      else if (target.dataset.queueEdit) {
+        editingQueueId = target.dataset.queueEdit;
+        queueSignature = "";
+        if (state) render(state);
+      } else if (target.dataset.queueSave) {
+        const field = document.querySelector("[data-queue-draft]");
+        const text = field?.value || "";
+        editingQueueId = null;
+        queueSignature = "";
+        await post("/queue", { id: target.dataset.queueSave, text });
+      }
       else if (target.dataset.decision) await post("/permission", { decision: target.dataset.decision });
       else if (target.dataset.plan) await post("/plan", { accept: target.dataset.plan === "1" });
       else if (target.dataset.change) await post("/change", { path: target.dataset.path, action: target.dataset.change });
@@ -1341,6 +1445,57 @@ function browserClient() {
     ).join("");
   }
 
+  function renderQueue(items) {
+    const box = $("queue");
+    if (items.length < 2) queueCollapsed = false;
+    if (!editingQueueId || !items.some((item) => item.id === editingQueueId)) editingQueueId = null;
+    const collapsed = queueCollapsed && items.length > 1;
+    const signature = JSON.stringify([collapsed, items.map((item) => [item.id, item.text, item.skills, item.files])]);
+    if (signature === queueSignature && box.dataset.editing === (editingQueueId || "")) return;
+    const draft = box.querySelector("[data-queue-draft]")?.value;
+    queueSignature = signature;
+    box.dataset.editing = editingQueueId || "";
+    box.hidden = items.length === 0;
+    const toggle = items.length > 1
+      ? `<button type="button" class="queue-toggle" data-queue-toggle>${collapsed ? `Show ${items.length} queued` : "Hide queue"}</button>`
+      : "";
+    box.innerHTML = toggle + (collapsed ? "" : items.map((item) => queueItemHtml(item)).join(""));
+    const field = box.querySelector("[data-queue-draft]");
+    if (field && draft != null) {
+      field.value = draft;
+      field.focus();
+    }
+  }
+
+  function queueItemHtml(item) {
+    const notes = [
+      ...(item.skills || []).map((name) => `Skill: ${name}`),
+      ...(item.files || []).map((name) => `Attached: ${name}`),
+    ];
+    const note = notes.length ? `<p class="queue-note">${esc(notes.join(" · "))}</p>` : "";
+    if (item.id === editingQueueId) {
+      return `<div class="queue-item">
+        <label class="sr-only" for="queue-draft">Queued message</label>
+        <textarea id="queue-draft" data-queue-draft="${esc(item.id)}">${esc(item.text)}</textarea>
+        ${note}
+        <div class="queue-actions">
+          <button type="button" data-queue-save="${esc(item.id)}">Save</button>
+          <button type="button" data-send-now="${esc(item.id)}">Send now</button>
+          <button type="button" data-queue-remove="${esc(item.id)}">Remove</button>
+        </div>
+      </div>`;
+    }
+    return `<div class="queue-item">
+      <p class="queue-text">${esc(item.text)}</p>
+      ${note}
+      <div class="queue-actions">
+        <button type="button" data-send-now="${esc(item.id)}">Send now</button>
+        <button type="button" data-queue-edit="${esc(item.id)}">Edit</button>
+        <button type="button" data-queue-remove="${esc(item.id)}">Remove</button>
+      </div>
+    </div>`;
+  }
+
   async function readFile(file) {
     const buffer = await file.arrayBuffer();
     if (buffer.byteLength > 8 * 1024 * 1024) throw new Error(`${file.name} is larger than 8 MB.`);
@@ -1373,8 +1528,9 @@ function browserClient() {
   async function sendMessage() {
     const text = $("text").value;
     if (!text.trim() && pendingFiles.length === 0) return;
-    if (!state || state.running) return;
-    const fresh = composingNew || !state.activeSession;
+    if (!state) return;
+    const queuing = state.running && !composingNew;
+    const fresh = !queuing && (composingNew || !state.activeSession);
     const files = pendingFiles;
     const skills = selectedSkills();
     const display = optimisticUserText(text, files);
@@ -1382,18 +1538,23 @@ function browserClient() {
 
     $("text").value = "";
     pendingFiles = [];
-    composingNew = false;
+    if (!queuing) composingNew = false;
     growText();
-    render({
-      ...previous,
-      error: "",
-      running: true,
-      activity: "Working",
-      pending: null,
-      transcript: fresh
-        ? [{ role: "user", text: display }]
-        : [...previous.transcript, { role: "user", text: display }],
-    });
+    if (!queuing) {
+      render({
+        ...previous,
+        error: "",
+        running: true,
+        stoppable: fresh ? false : previous.stoppable,
+        activity: "Working",
+        pending: null,
+        transcript: fresh
+          ? [{ role: "user", text: display }]
+          : [...previous.transcript, { role: "user", text: display }],
+      });
+    } else {
+      renderAttachments();
+    }
 
     try {
       await post(fresh ? "/prompt" : "/follow-up", { text, skills, files });
@@ -1403,8 +1564,8 @@ function browserClient() {
       growText();
       render({
         ...previous,
-        running: false,
-        activity: null,
+        running: queuing ? previous.running : false,
+        activity: queuing ? previous.activity : null,
         error: error.message || "Request failed.",
       });
     }
