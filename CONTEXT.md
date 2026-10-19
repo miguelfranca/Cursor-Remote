@@ -130,11 +130,12 @@ _Avoid_: engine, LLM
 - A **Desktop chat**'s open **Changes** show on the **Client** like any other **Change**, whether or not a **Session** continues that chat. **Accept** and **Undo** work on them there.
 - An **Accept** or **Undo** in the **Desktop IDE** counts as the same answer on the **Client**, even while the **Desktop IDE** is running. The **Desktop IDE**'s Keep is an **Accept**.
 - An **Accept** or **Undo** on the **Client** reaches the **Desktop IDE** only while it is not running. Until then the **Desktop IDE** may still show that **Change** as open. After an **Undo** on the **Client** it no longer does, because the file matches its baseline again.
-- A **Change** written into a **Desktop chat** stays open on the **Client** too. Either side can answer it.
+- A **Change** written into a **Desktop chat** stays open on the **Client** too. Either side can answer it. **Undo** in the **Desktop IDE** of a file the phone created leaves that file empty. **Undo** on the phone still removes it. **Undo** in the **Desktop IDE** of a file the desktop agent created removes it.
 - A **Change** from the **Desktop IDE** is open only while the file still differs from its baseline.
 - Only a finished exchange is written. A **Run** in progress is written after it ends or is stopped, if the **Desktop IDE** is still not running.
 - If a **Desktop chat** is not in a form the **Client** recognises, the write is refused. The **Session**'s messages stay waiting, and the **Client** shows why.
 - A **Session** with messages not yet written shows that it is waiting for the **Desktop IDE** to close. A refused write shows the reason. A fully written **Session** shows nothing extra.
+- A conversation with a **Change** accepted on the **Client** that the **Desktop IDE** still shows as pending also shows that it is waiting for the **Desktop IDE** to close. An **Undo** on the **Client** shows nothing extra, because the **Desktop IDE** stops showing that **Change** once the file is back to its baseline.
 - A **Session** linked to a **Desktop chat** shows that chat, then the **Session**'s messages that are not written into it yet. Its own messages always show as they are in its **Transcript**, including where **Changes** happened, even after they are written.
 - Exactly one **Workspace** is active at a time.
 - A **Workspace** is a directory in the **Catalog**. The client cannot activate a directory outside the catalog.

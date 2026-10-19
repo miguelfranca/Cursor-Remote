@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { readFields } from "./protobuf.js";
 
 export const USER_BUBBLE = 1;
@@ -88,10 +88,12 @@ export function readChat(database, chatId) {
   const wanted = headers.filter((header) =>
     header.type === USER_BUBBLE || (header.type === ASSISTANT_BUBBLE && !header.grouping?.capabilityType),
   );
-  const bubbles = readBubbles(database, chatId, wanted.map((header) => header.bubbleId));
+  const editBubbleIds = headers.filter((header) => fileToolAction(header) === "edit").map((header) => header.bubbleId);
+  const bubbles = readBubbles(database, chatId, [...wanted.map((header) => header.bubbleId), ...editBubbleIds]);
   const messages = [];
   const editTimes = {};
-  const markedPaths = new Set();
+  const editBaselines = {};
+  const markedChanges = new Set();
   let answeringBackgroundTask = false;
   for (const header of headers) {
     const { bubbleId } = header;
@@ -99,9 +101,14 @@ export function readChat(database, chatId) {
     if (toolAction) {
       const path = header.grouping.toolDisplayPath;
       editTimes[header.grouping.toolCallId] = Date.parse(header.createdAt) || 0;
-      if (markedPaths.has(path)) continue;
-      markedPaths.add(path);
+      if (toolAction === "edit") {
+        const before = editBefore(database, bubbles.get(bubbleId));
+        if (before !== undefined) editBaselines[header.grouping.toolCallId] = before;
+      }
       const action = toolAction === "edit" && createdFiles.has(pathToFileURL(path).href) ? "create" : toolAction;
+      const marker = `${action}:${path}`;
+      if (markedChanges.has(marker)) continue;
+      markedChanges.add(marker);
       messages.push({ bubbleId, role: "change", path, action });
       continue;
     }
@@ -113,7 +120,16 @@ export function readChat(database, chatId) {
       messages.push({ bubbleId, role: "assistant", text: bubble.text });
     }
   }
-  return { messages, editTimes, createdFiles };
+  return { messages, editTimes, createdFiles, editBaselines };
+}
+
+function editBefore(database, bubble) {
+  const result = parseJson(bubble?.toolFormerData?.result);
+  const beforeId = result?.beforeContentId;
+  if (typeof beforeId !== "string") return undefined;
+  const value = readValue(database, beforeId);
+  if (typeof value !== "string" && !Buffer.isBuffer(value)) return undefined;
+  return String(value);
 }
 
 export function pendingRowKey(workspaceId, diffId) {
@@ -126,11 +142,12 @@ export function listPendingRows(database, workspaceId) {
     .all(prefix, `${prefix.slice(0, -1)};`)
     .flatMap((row) => {
       const diff = parseJson(row.value);
-      if (!diff?.diffId || !diff.uri?.fsPath || !Array.isArray(diff.originalTextLines)) return [];
+      const path = diff?.uri?.fsPath ?? (diff?.uri?.external?.startsWith("file:") ? fileURLToPath(diff.uri.external) : null);
+      if (!diff?.diffId || !path || !Array.isArray(diff.originalTextLines)) return [];
       return [{
         rowKey: row.key,
         diffId: diff.diffId,
-        path: diff.uri.fsPath,
+        path,
         originalLines: diff.originalTextLines,
         chatId: diff.composerMetadata?.composerId ?? null,
         toolCallId: diff.composerMetadata?.toolCallId ?? null,

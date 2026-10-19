@@ -1129,7 +1129,9 @@ function browserClient() {
     const desktopNote = !composingNew && next.desktopStatus
       ? `<p class="hint desktop-note">${esc(next.desktopStatus.state === "refused"
         ? `Not added to the desktop chat: ${next.desktopStatus.reason}`
-        : "Waiting for Cursor on the PC to close before adding this to the desktop chat.")}</p>`
+        : next.desktopStatus.pending === "accepted"
+          ? "Waiting for Cursor on the PC to close before clearing accepted changes there."
+          : "Waiting for Cursor on the PC to close before adding this to the desktop chat.")}</p>`
       : "";
     $("transcript").innerHTML = transcript + activity + desktopNote;
 

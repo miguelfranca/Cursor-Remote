@@ -45,6 +45,14 @@ const STATE_FIELDS = {
 
 export class RefusedWrite extends Error {}
 
+export function repairPendingBaselines(database, repairs) {
+  for (const repair of repairs) {
+    const existing = parseJson(readValue(database, repair.rowKey));
+    if (!existing?.diffId) continue;
+    writeValue(database, repair.rowKey, JSON.stringify({ ...existing, originalTextLines: repair.originalTextLines }));
+  }
+}
+
 export function writeExchanges(database, { chatId, directory, session, exchanges, fileChanges = [] }) {
   database.exec("BEGIN IMMEDIATE");
   try {
@@ -68,6 +76,7 @@ function appendToChat(database, { chatId, directory, session, exchanges, fileCha
   const sources = bubbleSources(database, chatId, record) ?? findTemplate(database, directory).sources;
   const time = Math.max(Number(record.lastUpdatedAt) || 0, session.updatedAt || Date.now());
   record.originalFileStates ??= {};
+  record.newlyCreatedFiles ??= [];
   const appended = buildExchanges(database, {
     chatId,
     workspaceId: workspaceIdOf(directory),
@@ -76,7 +85,7 @@ function appendToChat(database, { chatId, directory, session, exchanges, fileCha
     sources,
     session,
     time,
-    fileStates: record.originalFileStates,
+    fileRecord: record,
   });
   record.conversationState = encodeState(Buffer.concat([
     state.bytes,
@@ -102,7 +111,7 @@ function createChat(database, { directory, session, exchanges, fileChanges }) {
   const workspaceId = workspaceIdOf(directory);
   const time = session.updatedAt || Date.now();
   const mode = desktopMode(session.mode);
-  const fileStates = {};
+  const fileRecord = { originalFileStates: {}, newlyCreatedFiles: [] };
   const appended = buildExchanges(database, {
     chatId,
     workspaceId,
@@ -111,7 +120,7 @@ function createChat(database, { directory, session, exchanges, fileChanges }) {
     sources: template.sources,
     session,
     time,
-    fileStates,
+    fileRecord,
   });
   const state = Buffer.concat([
     bytesField(STATE_FIELDS.rootPrompt, template.systemPrompt),
@@ -149,8 +158,7 @@ function createChat(database, { directory, session, exchanges, fileChanges }) {
     conversationMap: {},
     conversationState: encodeState(state),
     codeBlockData: {},
-    originalFileStates: fileStates,
-    newlyCreatedFiles: [],
+    ...fileRecord,
     newlyCreatedFolders: [],
     generatingBubbleIds: [],
     todos: [],
@@ -172,13 +180,13 @@ function createChat(database, { directory, session, exchanges, fileChanges }) {
   return { chatId, bubbles: appended.ranges, fileChanges: appended.fileChanges };
 }
 
-function buildExchanges(database, { chatId, workspaceId, exchanges, fileChanges, sources, session, time, fileStates }) {
+function buildExchanges(database, { chatId, workspaceId, exchanges, fileChanges, sources, session, time, fileRecord }) {
   const built = { rootPrompts: [], turns: [], recentUserMessages: [], headers: [], ranges: {}, fileChanges: {} };
   const modeNumber = desktopMode(session.mode).number;
   const modelName = desktopModelConfig(session).modelName;
   const addFileChanges = (exchangeIndex) => {
     for (const change of fileChanges.filter((candidate) => candidate.exchangeIndex === exchangeIndex)) {
-      const written = writeFileChange(database, { chatId, workspaceId, change, source: sources.assistant.bubble, time, fileStates });
+      const written = writeFileChange(database, { chatId, workspaceId, change, source: sources.assistant.bubble, time, fileRecord });
       built.headers.push(written.header);
       built.ranges[written.header.bubbleId] = [0, 0];
       built.fileChanges[change.path] = { bubbleId: written.header.bubbleId, diffId: written.diffId };
@@ -223,7 +231,7 @@ function buildExchanges(database, { chatId, workspaceId, exchanges, fileChanges,
   return built;
 }
 
-function writeFileChange(database, { chatId, workspaceId, change, source, time, fileStates }) {
+function writeFileChange(database, { chatId, workspaceId, change, source, time, fileRecord }) {
   const { path, baseline, content } = change;
   const before = baseline.content ?? "";
   const uri = pathToFileURL(path).href;
@@ -241,7 +249,10 @@ function writeFileChange(database, { chatId, workspaceId, change, source, time, 
     status: "completed",
     name: tool.name,
     ...tool.details,
-    additionalData: {},
+    additionalData: deleted || baseline.existed ? {} : {
+      isNewFile: true,
+      precomputedDiff: { lines: addedLines(content), hasChanges: true },
+    },
     toolCallBinary: Buffer.concat([
       tool.binary,
       stringField(57, toolCallId),
@@ -250,14 +261,16 @@ function writeFileChange(database, { chatId, workspaceId, change, source, time, 
     ]).toString("base64"),
   };
   writeBubble(database, chatId, bubble);
-  if (!fileStates[uri]) {
+  if (!fileRecord.originalFileStates[uri]) {
     const contentKey = `ofsContent:${chatId}:${uri}`;
     writeValue(database, contentKey, before);
-    fileStates[uri] = { firstEditBubbleId: bubbleId, isNewlyCreated: !baseline.existed, newlyCreatedFolders: [], contentKey };
+    fileRecord.originalFileStates[uri] = { firstEditBubbleId: bubbleId, isNewlyCreated: !baseline.existed, newlyCreatedFolders: [], contentKey };
+    if (!baseline.existed) fileRecord.newlyCreatedFiles.push({ uri: fileUri(path) });
   }
+  const originalTextLines = baseline.existed ? before.split("\n") : [];
   const diffId = deleted
     ? null
-    : writePendingRow(database, { workspaceId, chatId, path, uri, before, toolCallId, rowKey: change.rowKey });
+    : writePendingRow(database, { workspaceId, chatId, path, originalTextLines, toolCallId, rowKey: change.rowKey });
   const header = {
     bubbleId,
     type: ASSISTANT_BUBBLE,
@@ -307,7 +320,7 @@ function deleteTool({ path, before, toolCallId }) {
     toolCallCase: "deleteToolCall",
     details: {
       params: JSON.stringify({ relativeWorkspacePath: path }),
-      result: "{}",
+      result: JSON.stringify({ fileDeletedSuccessfully: true }),
       userDecision: "accepted",
     },
     grouping: {},
@@ -323,8 +336,7 @@ function deleteTool({ path, before, toolCallId }) {
   };
 }
 
-function writePendingRow(database, { workspaceId, chatId, path, uri, before, toolCallId, rowKey }) {
-  const originalTextLines = before.split("\n");
+function writePendingRow(database, { workspaceId, chatId, path, originalTextLines, toolCallId, rowKey }) {
   const existing = rowKey && parseJson(readValue(database, rowKey));
   if (existing?.diffId) {
     writeValue(database, rowKey, JSON.stringify({ ...existing, originalTextLines }));
@@ -333,7 +345,7 @@ function writePendingRow(database, { workspaceId, chatId, path, uri, before, too
   const diffId = randomUUID();
   writeValue(database, pendingRowKey(workspaceId, diffId), JSON.stringify({
     diffId,
-    uri: { $mid: 1, fsPath: path, external: uri, path, scheme: "file" },
+    uri: fileUri(path),
     originalTextLines,
     generationUUID: randomUUID(),
     composerMetadata: { composerId: chatId, codeblockId: toolCallId, toolCallId, composerGenerationID: randomUUID() },
@@ -474,10 +486,19 @@ function desktopModelConfig(session) {
 }
 
 function workspaceIdentifier(id, directory) {
-  return {
-    id,
-    uri: { $mid: 1, fsPath: directory, external: pathToFileURL(directory).href, path: directory, scheme: "file" },
-  };
+  return { id, uri: { ...fileUri(directory), fsPath: directory } };
+}
+
+function fileUri(path) {
+  return { $mid: 1, external: pathToFileURL(path).href, path, scheme: "file" };
+}
+
+function addedLines(content) {
+  return content.split("\n").map((line, index) => ({
+    type: "added",
+    content: line,
+    modifiedLineNumber: index + 1,
+  }));
 }
 
 function richText(text) {

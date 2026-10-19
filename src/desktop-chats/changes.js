@@ -16,11 +16,6 @@ export function conversationChanges({ ownChanges, rows, chat, rowsToRemove }) {
   }
   for (const row of rows) {
     if (removing.has(row.rowKey)) continue;
-    const ownPath = ownPathByDiff.get(row.diffId);
-    if (ownPath) {
-      changes.get(ownPath).rowKeys.push(row.rowKey);
-      continue;
-    }
     const desktop = {
       path: row.path,
       baseline: rowBaseline(row, chat),
@@ -28,6 +23,16 @@ export function conversationChanges({ ownChanges, rows, chat, rowsToRemove }) {
       own: false,
       rowKeys: [row.rowKey],
     };
+    const ownPath = ownPathByDiff.get(row.diffId);
+    if (ownPath) {
+      const own = changes.get(ownPath);
+      own.rowKeys.push(row.rowKey);
+      if (desktop.touchedAt < own.touchedAt) {
+        own.baseline = desktop.baseline;
+        own.touchedAt = desktop.touchedAt;
+      }
+      continue;
+    }
     const existing = changes.get(row.path);
     if (!existing) {
       changes.set(row.path, desktop);
@@ -44,7 +49,9 @@ export function conversationChanges({ ownChanges, rows, chat, rowsToRemove }) {
   return [...changes.values()];
 }
 
-function rowBaseline(row, chat) {
-  const created = chat?.createdFiles.has(pathToFileURL(row.path).href) && row.originalLines.join("") === "";
-  return created ? { existed: false, content: null } : { existed: true, content: row.originalLines.join("\n") };
+export function rowBaseline(row, chat) {
+  const recorded = chat?.editBaselines?.[row.toolCallId];
+  const content = recorded !== undefined ? recorded : row.originalLines.join("\n");
+  const created = chat?.createdFiles.has(pathToFileURL(row.path).href) && content === "";
+  return created ? { existed: false, content: null } : { existed: true, content };
 }

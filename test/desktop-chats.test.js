@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,7 +8,7 @@ import { pathToFileURL } from "node:url";
 import { continuationPrompt, createDesktopChats } from "../src/desktop-chats/index.js";
 import { pendingExchanges } from "../src/desktop-chats/exchanges.js";
 import { isDesktopIdeRunning, profileOfStore } from "../src/desktop-chats/ide-running.js";
-import { bytesField, varintField } from "../src/desktop-chats/protobuf.js";
+import { bytesField, fieldValues, readFields, varintField } from "../src/desktop-chats/protobuf.js";
 import { desktopWorkspaceId, encodeState, putBlob } from "../src/desktop-chats/store.js";
 
 const templateChatId = "aaaaaaaa-0000-0000-0000-000000000001";
@@ -70,7 +70,7 @@ function seededStore() {
   }
   insert.run(`inlineDiff:${desktopWorkspaceId(workspace)}:diff-1`, JSON.stringify({
     diffId: "diff-1",
-    uri: { fsPath: authFile },
+    uri: { external: pathToFileURL(authFile).href, path: authFile, scheme: "file" },
     originalTextLines: ["old auth", ""],
     composerMetadata: { composerId: templateChatId, toolCallId: "tool-1" },
   }));
@@ -134,10 +134,88 @@ test("desktop pending edits show as changes, and the earliest baseline wins", ()
   assert.deepEqual(phoneLater[0].rowKeys, desktopChange.rowKeys);
   const phoneEarlier = desktop.changes({ directory: workspace, chatId: templateChatId, ownChanges: phoneBaseline(Date.parse("2025-12-01")) });
   assert.equal(phoneEarlier[0].baseline.content, "middle auth\n");
+  const linkedLater = phoneBaseline(Date.parse("2026-02-01"));
+  linkedLater[authFile].desktopDiffId = "diff-1";
+  const linked = desktop.changes({ directory: workspace, chatId: templateChatId, ownChanges: linkedLater });
+  assert.equal(linked[0].baseline.content, "old auth\n");
+  assert.deepEqual(linked[0].rowKeys, desktopChange.rowKeys);
 
   assert.deepEqual(desktop.changes({ directory: workspace, chatId: templateChatId, rowsToRemove: desktopChange.rowKeys }), []);
+  const answered = { directory: workspace, chatId: templateChatId, rowsToRemove: desktopChange.rowKeys };
+  assert.deepEqual(desktop.status(answered), { state: "waiting", pending: "accepted" });
+  writeFileSync(authFile, "old auth\n");
+  assert.equal(desktop.status(answered), null);
   assert.equal(desktop.removeRows(desktopChange.rowKeys), true);
   assert.deepEqual(desktop.pendingRows(workspace), []);
+});
+
+test("a drifted desktop row is put back to the edit's original text", () => {
+  const { workspace, storeFile, desktop, authFile } = seededStore();
+  const beforeKey = "composer.content.before-auth";
+  const database = new DatabaseSync(storeFile);
+  const insert = database.prepare("insert or replace into cursorDiskKV(key, value) values (?, ?)");
+  insert.run(beforeKey, "old auth\n");
+  insert.run(`bubbleId:${templateChatId}:edit-1`, JSON.stringify({
+    toolFormerData: { result: JSON.stringify({ beforeContentId: beforeKey }) },
+  }));
+  insert.run(`inlineDiff:${desktopWorkspaceId(workspace)}:diff-1`, JSON.stringify({
+    diffId: "diff-1",
+    uri: { external: pathToFileURL(authFile).href, path: authFile, scheme: "file" },
+    originalTextLines: ["mutated"],
+    composerMetadata: { composerId: templateChatId, toolCallId: "tool-1" },
+  }));
+  database.close();
+
+  const seen = desktop.changes({
+    directory: workspace,
+    chatId: templateChatId,
+    ownChanges: {
+      [authFile]: {
+        existed: true,
+        content: "middle auth\n",
+        touchedAt: Date.parse("2026-02-01"),
+        desktopBubbleId: "phone-edit",
+        desktopDiffId: "diff-1",
+      },
+    },
+  });
+  assert.equal(seen[0].baseline.content, "old auth\n");
+
+  const session = phoneSession({
+    ideChatId: templateChatId,
+    desktopWritten: 1,
+    changes: {
+      [authFile]: {
+        existed: true,
+        content: "middle auth\n",
+        touchedAt: Date.parse("2026-02-01"),
+        desktopBubbleId: "phone-edit",
+        desktopDiffId: "diff-1",
+      },
+    },
+    transcript: [{ role: "user", text: "Already written" }],
+  });
+  assert.equal(desktop.write(workspace, session), true);
+  const row = desktop.pendingRows(workspace).find((candidate) => candidate.diffId === "diff-1");
+  assert.deepEqual(row.originalLines, ["old auth", ""]);
+  const headers = JSON.parse(readValue(storeFile, `composerData:${templateChatId}`)).fullConversationHeadersOnly;
+  assert.equal(headers.some((header) => header.bubbleId === "phone-edit"), false);
+
+  const again = new DatabaseSync(storeFile);
+  again.prepare("insert or replace into cursorDiskKV(key, value) values (?, ?)").run(
+    `inlineDiff:${desktopWorkspaceId(workspace)}:diff-1`,
+    JSON.stringify({
+      diffId: "diff-1",
+      uri: { external: pathToFileURL(authFile).href, path: authFile, scheme: "file" },
+      originalTextLines: ["mutated"],
+      composerMetadata: { composerId: templateChatId, toolCallId: "tool-1" },
+    }),
+  );
+  again.close();
+  session.changes = {};
+  assert.equal(desktop.write(workspace, session), true);
+  const repaired = desktop.pendingRows(workspace).find((candidate) => candidate.diffId === "diff-1");
+  assert.deepEqual(repaired.originalLines, ["old auth", ""]);
 });
 
 test("a phone change is written into the desktop chat as an edit with a pending row", () => {
@@ -191,7 +269,7 @@ test("a phone session becomes a desktop chat once its exchanges finish", () => {
   assert.equal(desktop.write(workspace, session, { lastIsRunning: true }), true);
   assert.ok(session.ideChatId);
   assert.equal(session.desktopWritten, 4);
-  assert.deepEqual(desktop.status(session), { state: "waiting" });
+  assert.deepEqual(desktop.status({ directory: workspace, session }), { state: "waiting", pending: "messages" });
   assert.deepEqual(desktop.list(workspace).map((chat) => chat.title), ["Phone chat", "Fix the login bug"]);
   assert.deepEqual(
     desktop.read(session.ideChatId).messages.map(({ role, text }) => ({ role, text })),
@@ -201,7 +279,7 @@ test("a phone session becomes a desktop chat once its exchanges finish", () => {
 
   assert.equal(desktop.write(workspace, session), true);
   assert.equal(session.desktopWritten, 5);
-  assert.equal(desktop.status(session), null);
+  assert.equal(desktop.status({ directory: workspace, session }), null);
   assert.deepEqual(desktop.transcript(session), session.transcript);
   assert.equal(desktop.write(workspace, session), false);
 
@@ -217,6 +295,33 @@ test("a phone session becomes a desktop chat once its exchanges finish", () => {
     selectedModels: [{ modelId: "grok-4.7", parameters: [{ id: "fast", value: "true" }] }],
   });
   assert.deepEqual(userBubble.context, { fileSelections: [] });
+});
+
+test("a file created on the phone is written the way Cursor writes its own new files", () => {
+  const { workspace, storeFile, desktop } = seededStore();
+  const created = join(workspace, "new.txt");
+  writeFileSync(created, "fresh\n");
+  const session = phoneSession({
+    ideChatId: templateChatId,
+    changes: { [created]: { existed: false, content: null, touchedAt: 6000 } },
+    transcript: [
+      { role: "user", text: "Add new.txt" },
+      { role: "change", path: created, action: "create" },
+      { role: "assistant", text: "Added." },
+    ],
+  });
+
+  assert.equal(desktop.write(workspace, session), true);
+  const row = desktop.pendingRows(workspace).find((candidate) => candidate.path === created);
+  assert.deepEqual(row.originalLines, []);
+  const record = JSON.parse(readValue(storeFile, `composerData:${templateChatId}`));
+  assert.equal(record.originalFileStates[pathToFileURL(created).href].isNewlyCreated, true);
+  assert.deepEqual(record.newlyCreatedFiles[0].uri, {
+    $mid: 1,
+    external: pathToFileURL(created).href,
+    path: created,
+    scheme: "file",
+  });
 });
 
 test("a phone deletion is written as a desktop delete message without a pending row", () => {
@@ -239,6 +344,12 @@ test("a phone deletion is written as a desktop delete message without a pending 
   assert.equal(desktop.pendingRows(workspace).some((row) => row.path === gone), false);
   const bubble = JSON.parse(readValue(storeFile, `bubbleId:${templateChatId}:${desktopBubbleId}`));
   assert.equal(bubble.toolFormerData.name, "delete_file");
+  assert.equal(JSON.parse(bubble.toolFormerData.result).fileDeletedSuccessfully, true);
+  const toolCall = readFields(Buffer.from(bubble.toolFormerData.toolCallBinary, "base64"));
+  const deleteCall = readFields(fieldValues(toolCall, 3)[0]);
+  const result = readFields(fieldValues(deleteCall, 2)[0]);
+  const success = readFields(fieldValues(result, 1)[0]);
+  assert.equal(fieldValues(success, 4)[0].toString("utf8"), "bye\n");
   const record = JSON.parse(readValue(storeFile, `composerData:${templateChatId}`));
   assert.equal(readValue(storeFile, record.originalFileStates[pathToFileURL(gone).href].contentKey), "bye\n");
   assert.deepEqual(
@@ -246,6 +357,26 @@ test("a phone deletion is written as a desktop delete message without a pending 
     { bubbleId: desktopBubbleId, role: "change", path: gone, action: "delete" },
   );
   assert.equal(desktop.write(workspace, session), false);
+});
+
+test("a file edited and later deleted in a desktop chat gets a marker for each", () => {
+  const { workspace, desktop, authFile } = seededStore();
+  rmSync(authFile);
+  const session = phoneSession({
+    ideChatId: templateChatId,
+    changes: { [authFile]: { existed: true, content: "new auth\n", touchedAt: Date.parse("2026-02-01") } },
+    transcript: [
+      { role: "user", text: "Remove auth.ts" },
+      { role: "change", path: authFile, action: "delete" },
+      { role: "assistant", text: "Removed." },
+    ],
+  });
+
+  assert.equal(desktop.write(workspace, session), true);
+  assert.deepEqual(
+    desktop.read(templateChatId).messages.filter((message) => message.path === authFile).map((message) => message.action),
+    ["edit", "delete"],
+  );
 });
 
 test("a session that continued a desktop chat adds its lines after what the IDE saved", () => {
@@ -288,8 +419,8 @@ test("a desktop chat in an unknown format refuses the write and keeps the lines 
   });
 
   assert.equal(desktop.write(workspace, session), true);
-  assert.equal(desktop.status(session).state, "refused");
-  assert.match(desktop.status(session).reason, /version 19/);
+  assert.equal(desktop.status({ directory: workspace, session }).state, "refused");
+  assert.match(desktop.status({ directory: workspace, session }).reason, /version 19/);
   assert.equal(session.desktopWritten, undefined);
   assert.equal(desktop.write(workspace, session), false);
 });

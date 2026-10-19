@@ -82,9 +82,22 @@ function reverseStrReplace(file, oldString, newString) {
   return disk;
 }
 
+export function isDeletion(tool, file) {
+  if (String(tool?.kind || "") === "delete") return true;
+  const label = `${tool?.name || ""} ${tool?.title || ""}`;
+  if (/\bdelete(?:_file)?\b/i.test(label)) return true;
+  return (tool?.content || []).some((item) => {
+    if (item?.type !== "diff") return false;
+    if (file && item.path && item.path !== file) return false;
+    if ((item.changes || []).some((change) => /delete/i.test(String(change?.operation || change?.type || "")))) return true;
+    const cleared = "newText" in item && (item.newText === "" || item.newText == null);
+    return cleared && currentText(item.path || file) === null;
+  });
+}
+
 export function isFileMutation(tool) {
   const kind = String(tool?.kind || "");
-  if (kind === "edit" || kind === "delete" || kind === "move") return true;
+  if (kind === "edit" || kind === "delete" || kind === "move" || isDeletion(tool)) return true;
   if (
     kind === "read"
     || kind === "search"
@@ -100,7 +113,7 @@ export function isFileMutation(tool) {
 
 export function mutationAction(tool, baseline) {
   const kind = String(tool?.kind || "");
-  if (kind === "delete") return "delete";
+  if (isDeletion(tool)) return "delete";
   if (kind === "move") return "move";
   if (baseline && baseline.existed === false) return "create";
   return "edit";
@@ -116,8 +129,8 @@ export function activityLabel(tool) {
   const raw = tool.rawInput && typeof tool.rawInput === "object" ? tool.rawInput : {};
   const command = typeof raw.command === "string" ? raw.command.trim() : "";
   if (kind === "read") return file ? `Reading ${file}` : title || "Reading";
+  if (isDeletion(tool)) return file ? `Deleting ${file}` : title || "Deleting";
   if (kind === "edit") return file ? `Editing ${file}` : title || "Editing";
-  if (kind === "delete") return file ? `Deleting ${file}` : title || "Deleting";
   if (kind === "move") return file ? `Moving ${file}` : title || "Moving";
   if (kind === "search") return title || "Searching";
   if (kind === "execute" || command) return shortCommand(command || title || "command");

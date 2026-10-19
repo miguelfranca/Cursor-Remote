@@ -8,8 +8,8 @@ import { createCatalog } from "../src/catalog.js";
 import { displayText, normalizeFiles, promptBlocks } from "../src/files.js";
 import { ideProjectDirectories } from "../src/ide-projects.js";
 import { currentText, remember, repairBaseline, restore } from "../src/changes.js";
-import { activityLabel, commandKey, isFileMutation, pathsFromTool, priorFromTool } from "../src/command-key.js";
-import { diffParts, unifiedDiff } from "../src/diff.js";
+import { activityLabel, commandKey, isFileMutation, mutationAction, pathsFromTool, priorFromTool } from "../src/command-key.js";
+import { changeParts, diffParts, unifiedDiff } from "../src/diff.js";
 import { renderMarkdown } from "../src/markdown.js";
 
 test("catalog starts empty and only lists added directories", () => {
@@ -65,6 +65,14 @@ test("file attachments become image and resource prompt blocks", () => {
   assert.equal(blocks[3].resource.blob, pdf);
   assert.equal(displayText("Look at these", files), "Look at these\n\nAttached: shot.png, notes.txt, spec.pdf");
   assert.throws(() => normalizeFiles([{ name: "bad.bin", data: "!!!!" }]));
+});
+
+test("an empty file appearing or disappearing still counts as a change", () => {
+  assert.deepEqual(changeParts({ existed: false, content: null }, ""), [{ type: "hunk", lines: ["@@ new empty file @@"] }]);
+  assert.deepEqual(changeParts({ existed: true, content: "" }, null), [{ type: "hunk", lines: ["@@ deleted empty file @@"] }]);
+  assert.deepEqual(changeParts({ existed: true, content: "" }, ""), []);
+  assert.deepEqual(changeParts({ existed: false, content: null }, null), []);
+  assert.equal(changeParts({ existed: false, content: null }, "text").length, 1);
 });
 
 test("restore brings back a created file and a deleted file", () => {
@@ -160,6 +168,25 @@ test("diff parts keep surrounding lines behind expandable gaps", () => {
   assert.ok(parts[1].lines.some((line) => line.includes("line 20 edited")));
   assert.equal(parts[2].type, "gap");
   assert.ok(parts[2].lines.length > 10);
+});
+
+test("deleting a file created in the same chat is a delete", () => {
+  const root = mkdtempSync(join(tmpdir(), "delete-label-"));
+  const file = join(root, "sample2.txt");
+  const named = { kind: "other", name: "delete_file", title: "Delete", rawInput: { path: file } };
+  assert.equal(isFileMutation(named), true);
+  assert.equal(mutationAction(named, { existed: false, content: null }), "delete");
+  const cleared = {
+    kind: "edit",
+    content: [{ type: "diff", path: file, oldText: "-- /dev/null", newText: "" }],
+  };
+  assert.equal(mutationAction(cleared, { existed: false, content: null }), "delete");
+  writeFileSync(file, "hello\n");
+  const created = {
+    kind: "edit",
+    content: [{ type: "diff", path: file, oldText: "-- /dev/null", newText: "hello\n" }],
+  };
+  assert.equal(mutationAction(created, { existed: false, content: null }), "create");
 });
 
 test("only mutating tools become file changes", () => {

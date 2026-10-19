@@ -23,6 +23,12 @@ export function diffParts(before, after) {
   return formatParts(diffOps(a, b), CONTEXT);
 }
 
+export function changeParts(baseline, current) {
+  const parts = diffParts(baseline.content, current);
+  if (parts.length || baseline.existed === (current !== null)) return parts;
+  return [{ type: "hunk", lines: [current === null ? "@@ deleted empty file @@" : "@@ new empty file @@"] }];
+}
+
 export function lineCounts(before, after) {
   const counts = { added: 0, removed: 0 };
   for (const part of diffParts(before, after)) {

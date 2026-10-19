@@ -8,8 +8,8 @@ import { createCatalog } from "./catalog.js";
 import { continuationPrompt, createDesktopChats } from "./desktop-chats/index.js";
 import { ideProjectDirectories } from "./ide-projects.js";
 import { currentText, remember, repairBaseline, restore } from "./changes.js";
-import { activityLabel, commandKey, isFileMutation, mutationAction, pathsFromTool, priorFromTool } from "./command-key.js";
-import { diffParts, unifiedDiff } from "./diff.js";
+import { activityLabel, commandKey, isDeletion, isFileMutation, mutationAction, pathsFromTool, priorFromTool } from "./command-key.js";
+import { changeParts } from "./diff.js";
 import { displayText, normalizeFiles, promptBlocks } from "./files.js";
 import { composePrompt, listSkills, skillBodies } from "./skills.js";
 
@@ -30,12 +30,17 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
   let starting = null;
   let waiter = null;
   let saveTimer = null;
+  let lastPublished = "";
   const liveSessions = new Set();
 
   save();
 
-  function publish() {
+  function publish({ onlyIfChanged = false } = {}) {
+    if (onlyIfChanged && !listeners.size) return;
     const snapshot = view();
+    const serialized = JSON.stringify(snapshot);
+    if (onlyIfChanged && serialized === lastPublished) return;
+    lastPublished = serialized;
     for (const listener of listeners) listener(snapshot);
   }
 
@@ -98,9 +103,8 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
   function syncDesktop() {
     let changed = followDesktopAnswers();
     if (!desktop.ideRunning()) changed = writeDesktopChats() || changed;
-    if (!changed) return;
-    saveNow();
-    publish();
+    if (changed) saveNow();
+    publish({ onlyIfChanged: true });
   }
 
   function followDesktopAnswers() {
@@ -138,17 +142,14 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
   function openConversation() {
     const directory = state.activeWorkspace;
     const workspace = directory ? state.workspaces[directory] : null;
-    return workspace ? { directory, workspace, ...shown(workspace, directory) } : {};
+    if (!workspace) return {};
+    const open = shown(workspace, directory);
+    return { directory, workspace, ...open, chatId: open.session ? open.session.ideChatId : open.chat?.id ?? null };
   }
 
-  function conversationChanges({ directory, session, chat }) {
+  function conversationChanges({ directory, session, chat, chatId }) {
     if (!session && !chat) return [];
-    return desktop.changes({
-      directory,
-      chatId: session ? session.ideChatId : chat.id,
-      ownChanges: session?.changes,
-      rowsToRemove: state.desktopRowsToRemove,
-    });
+    return desktop.changes({ directory, chatId, ownChanges: session?.changes, rowsToRemove: state.desktopRowsToRemove });
   }
 
   function answerChange(session, change, action) {
@@ -337,7 +338,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
           : null,
       sessions: workspace && directory ? sessionList(workspace, directory) : [],
       transcript,
-      desktopStatus: session ? desktop.status(session) : null,
+      desktopStatus: desktop.status({ directory, session, chatId: open.chatId, rowsToRemove: state.desktopRowsToRemove }),
       mode: session?.mode ?? workspace?.preferredMode ?? "agent",
       modes: MODES,
       model: session?.model ?? "Auto",
@@ -383,7 +384,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
 
   function changeViews(open) {
     return conversationChanges(open).flatMap(({ path, baseline }) => {
-      const parts = diffParts(baseline.content, currentText(path));
+      const parts = changeParts(baseline, currentText(path));
       return parts.length ? [{ path, parts }] : [];
     });
   }
@@ -395,7 +396,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     let added = false;
     for (const [file, baseline] of Object.entries(session.changes)) {
       if (marked.has(file)) continue;
-      if (!unifiedDiff(baseline.content, currentText(file), file)) continue;
+      if (!changeParts(baseline, currentText(file)).length) continue;
       session.transcript.push({
         role: "change",
         path: file,
@@ -591,6 +592,10 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     if (!isFileMutation(tool)) return;
     for (const file of pathsFromTool(tool)) {
       const prior = priorFromTool(tool, file);
+      if (isDeletion(tool, file)) {
+        noteDeletion(session, file, prior);
+        continue;
+      }
       if (Object.hasOwn(session.changes, file)) {
         repairBaseline(session.changes, file, prior);
         continue;
@@ -602,6 +607,31 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
         action: mutationAction(tool, session.changes[file]),
       });
     }
+  }
+
+  function noteDeletion(session, file, prior) {
+    const existing = session.changes[file];
+    const latest = [...session.transcript].reverse().find((message) => message.role === "change" && message.path === file);
+    const removed = typeof prior === "string" ? prior : existing?.existed ? existing.content : currentText(file);
+    if (latest?.action !== "delete") {
+      if (existing?.desktopDiffId) queueRemovedRow(existing.desktopDiffId);
+      session.transcript.push({ role: "change", path: file, action: "delete" });
+    }
+    const alreadyWritten = latest?.action === "delete" && existing?.desktopBubbleId;
+    session.changes[file] = {
+      existed: true,
+      content: removed ?? "",
+      touchedAt: existing?.touchedAt ?? Date.now(),
+      ...(alreadyWritten ? { desktopBubbleId: existing.desktopBubbleId, desktopDiffId: existing.desktopDiffId } : {}),
+    };
+  }
+
+  function queueRemovedRow(diffId) {
+    const directory = state.activeWorkspace;
+    if (!directory) return;
+    const row = (desktop.pendingRows(directory) ?? []).find((candidate) => candidate.diffId === diffId);
+    if (!row) return;
+    state.desktopRowsToRemove = [...new Set([...(state.desktopRowsToRemove ?? []), row.rowKey])];
   }
 
   function extMethod(method, params) {
