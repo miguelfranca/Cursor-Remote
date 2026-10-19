@@ -118,14 +118,22 @@ Then reload the page in the browser. If you started the client with `npm start` 
 
 ### Debug the client
 
-See whether the client is running, restart it, stop it, or follow its log:
+Restart the client from the project folder:
 
 ```bash
+npm run restart
+```
+
+See whether it is answering, stop it, or follow its log:
+
+```bash
+npm run live
 systemctl --user status cursor-remote
-systemctl --user restart cursor-remote
 systemctl --user stop cursor-remote
 journalctl --user -u cursor-remote -f
 ```
+
+`npm run live` prints `Live on http://127.0.0.1:3000` when the client answers on the port in `.env`. It prints `Not live` and exits with an error when nothing answers.
 
 To run it in the foreground in this terminal, stop the service, then from the project folder run `npm start`.
 

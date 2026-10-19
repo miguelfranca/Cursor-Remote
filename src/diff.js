@@ -23,6 +23,24 @@ export function diffParts(before, after) {
   return formatParts(diffOps(a, b), CONTEXT);
 }
 
+export function changeParts(baseline, current) {
+  const parts = diffParts(baseline.content, current);
+  if (parts.length || baseline.existed === (current !== null)) return parts;
+  return [{ type: "hunk", lines: [current === null ? "@@ deleted empty file @@" : "@@ new empty file @@"] }];
+}
+
+export function lineCounts(before, after) {
+  const counts = { added: 0, removed: 0 };
+  for (const part of diffParts(before, after)) {
+    if (part.type !== "hunk") continue;
+    for (const line of part.lines.slice(1)) {
+      if (line.startsWith("+")) counts.added += 1;
+      else if (line.startsWith("-")) counts.removed += 1;
+    }
+  }
+  return counts;
+}
+
 function diffOps(a, b) {
   const table = lcs(a, b);
   const ops = [];

@@ -121,6 +121,17 @@ export function clientPage() {
       color: var(--text);
     }
     .icon-btn svg { width: 1.35rem; height: 1.35rem; display: block; }
+    #more-open { position: relative; }
+    .changes-dot {
+      position: absolute;
+      top: 0.55rem;
+      right: 0.55rem;
+      width: 0.55rem;
+      height: 0.55rem;
+      border-radius: 50%;
+      background: #e03131;
+      box-shadow: 0 0 0 2px var(--bg);
+    }
     .app {
       position: relative;
       width: min(100%, 48rem);
@@ -357,6 +368,7 @@ export function clientPage() {
       border-color: #f4f4f4;
     }
     .empty, .hint { color: var(--muted); }
+    .desktop-note { margin: 0.25rem 0 0; font-size: 0.85rem; }
     .workspace-chip {
       margin: 0 0 0.35rem;
       color: var(--muted);
@@ -802,6 +814,7 @@ export function clientPage() {
     </div>
     <button id="more-open" class="icon-btn" type="button" aria-label="More options" aria-expanded="false" aria-controls="more-sheet">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M6 10.5a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3zm6 0a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3zm6 0a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3z"/></svg>
+      <span id="changes-dot" class="changes-dot" hidden></span>
     </button>
   </header>
   <p id="error" class="error" role="alert" hidden></p>
@@ -1113,7 +1126,14 @@ function browserClient() {
           <span class="activity-dots">${esc(next.activity)}</span>
         </div>`
       : "";
-    $("transcript").innerHTML = transcript + activity;
+    const desktopNote = !composingNew && next.desktopStatus
+      ? `<p class="hint desktop-note">${esc(next.desktopStatus.state === "refused"
+        ? `Not added to the desktop chat: ${next.desktopStatus.reason}`
+        : next.desktopStatus.pending === "accepted"
+          ? "Waiting for Cursor on the PC to close before clearing accepted changes there."
+          : "Waiting for Cursor on the PC to close before adding this to the desktop chat.")}</p>`
+      : "";
+    $("transcript").innerHTML = transcript + activity + desktopNote;
 
     $("mode").innerHTML = next.modes.map((mode) =>
       `<option ${mode === next.mode ? "selected" : ""}>${esc(mode)}</option>`
@@ -1155,6 +1175,8 @@ function browserClient() {
     const countLabel = count === 1 ? "1 open" : count > 1 ? `${count} open` : "";
     $("change-count").textContent = countLabel;
     $("change-count-sheet").textContent = countLabel;
+    $("changes-dot").hidden = count === 0;
+    $("more-open").setAttribute("aria-label", count ? `More options, ${countLabel} changes` : "More options");
     const paths = new Set(next.changes.map((change) => change.path));
     expandedGaps.forEach((key) => {
       if (!paths.has(key.split("\0")[0])) expandedGaps.delete(key);

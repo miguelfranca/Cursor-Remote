@@ -17,7 +17,7 @@ One conversation with a local agent on the client.
 _Avoid_: chat tab, thread, desktop chat
 
 **Desktop chat**:
-A conversation the desktop IDE wrote for a workspace. The client lists it with that workspace's sessions.
+A conversation in the desktop IDE's chat list for a workspace. A chat started with the `agent` command is not a desktop chat.
 _Avoid_: IDE transcript, composer, session
 
 **Workspace**:
@@ -37,7 +37,7 @@ The work a session does after a prompt or follow-up, until it finishes or is can
 _Avoid_: turn, job, task
 
 **Change**:
-One file a local agent wrote during a session, compared with that file's contents from just before the agent first touched it in that session. It stays open until it is accepted or undone. The transcript shows when that first touch happened.
+One file an agent wrote during a session or a desktop chat, compared with that file's contents from just before an agent first touched it in that conversation. It stays open until it is accepted or undone. The transcript shows when that first touch happened.
 _Avoid_: diff, hunk, edit, pending command
 
 **Accept**:
@@ -45,7 +45,7 @@ Keeping the agent's version of a change, so that change is no longer open.
 _Avoid_: keep, approve
 
 **Undo**:
-Putting a change's path back to how it was before the agent first touched it in that session, removing a created file or writing a deleted file back, so the change is no longer open.
+Putting a change's path back to how it was before an agent first touched it in that conversation, removing a created file or writing a deleted file back, so the change is no longer open.
 _Avoid_: reject, revert, discard
 
 **Pending command**:
@@ -124,7 +124,19 @@ _Avoid_: engine, LLM
 
 - A **Desktop IDE** may be open while a **Local agent** is running. They do not share a **Session**.
 - A **Desktop chat** belongs to one **Workspace**. The **Client** lists it with that workspace's **Sessions**. It does not become the active conversation until the operator opens it from that list.
-- Continuing a **Desktop chat** on the **Client** starts a **Session** that already knows that conversation. The **Desktop chat** itself does not receive the **Client**'s messages.
+- Continuing a **Desktop chat** on the **Client** starts a **Session** that already knows that conversation. A **Desktop chat** receives that **Session**'s messages only while the **Desktop IDE** is not running. The **Client** does this on its own. The **Client** does not close the **Desktop IDE**.
+- Every **Session** is written into a **Desktop chat**. One that continued a **Desktop chat** adds its messages at the end of that chat, after whatever the **Desktop IDE** saved. One that started on the **Client** becomes a new **Desktop chat**.
+- What a **Desktop chat** receives is the text of each **Prompt** or **Follow-up** and its reply, with **File attachments** shown by name, and the **Session**'s open **Changes**, each shown where the agent first touched the file. **Pending commands**, **Agent questions**, and **Plans** are not written.
+- A **Desktop chat**'s open **Changes** show on the **Client** like any other **Change**, whether or not a **Session** continues that chat. **Accept** and **Undo** work on them there.
+- An **Accept** or **Undo** in the **Desktop IDE** counts as the same answer on the **Client**, even while the **Desktop IDE** is running. The **Desktop IDE**'s Keep is an **Accept**.
+- An **Accept** or **Undo** on the **Client** reaches the **Desktop IDE** only while it is not running. Until then the **Desktop IDE** may still show that **Change** as open. After an **Undo** on the **Client** it no longer does, because the file matches its baseline again.
+- A **Change** written into a **Desktop chat** stays open on the **Client** too. Either side can answer it. **Undo** in the **Desktop IDE** of a file the phone created leaves that file empty. **Undo** on the phone still removes it. **Undo** in the **Desktop IDE** of a file the desktop agent created removes it.
+- A **Change** from the **Desktop IDE** is open only while the file still differs from its baseline.
+- Only a finished exchange is written. A **Run** in progress is written after it ends or is stopped, if the **Desktop IDE** is still not running.
+- If a **Desktop chat** is not in a form the **Client** recognises, the write is refused. The **Session**'s messages stay waiting, and the **Client** shows why.
+- A **Session** with messages not yet written shows that it is waiting for the **Desktop IDE** to close. A refused write shows the reason. A fully written **Session** shows nothing extra.
+- A conversation with a **Change** accepted on the **Client** that the **Desktop IDE** still shows as pending also shows that it is waiting for the **Desktop IDE** to close. An **Undo** on the **Client** shows nothing extra, because the **Desktop IDE** stops showing that **Change** once the file is back to its baseline.
+- A **Session** linked to a **Desktop chat** shows that chat, then the **Session**'s messages that are not written into it yet. Its own messages always show as they are in its **Transcript**, including where **Changes** happened, even after they are written.
 - Exactly one **Workspace** is active at a time.
 - A **Workspace** is a directory in the **Catalog**. The client cannot activate a directory outside the catalog.
 - The **Catalog** lists every folder the **Desktop IDE** has opened, and any directory added on this PC. The client cannot activate a directory outside the catalog. A folder opened in the **Desktop IDE** is listed again if it was removed.
@@ -139,9 +151,10 @@ _Avoid_: engine, LLM
 - In plan or ask **Mode**, a **Run** does not create **Changes** and does not raise **Pending commands**.
 - **Stop** ends that **Run**. A **Pending command**, **Agent question**, or **Plan** that was still waiting is dropped. Open **Changes** already made stay open. The session is then idle.
 - A **Workspace**'s **Sessions**, their **Transcripts**, and their open **Changes** survive a restart of the process on this PC. A **Run** that was in progress at the restart is stopped.
-- A **Change** belongs to exactly one **Session**. A new **Session** starts with no open changes.
+- A **Change** belongs to exactly one **Session** or **Desktop chat**. A **Session** that continues a **Desktop chat** shares its **Changes** with that chat. A new **Session** that continues nothing starts with no open changes.
+- A file has at most one open **Change** in a conversation. When both sides touched it, its baseline is the earliest one.
 - Open **Changes** stay on the **Session** that made them when another **Session** becomes active.
-- **Accept** and **Undo** apply to one **Change**, or to every open **Change** of a **Session**.
+- **Accept** and **Undo** apply to one **Change**, or to every open **Change** of a **Session** or **Desktop chat**.
 - An open **Change** can be read during a **Run**, including its difference from the baseline. **Accept** and **Undo** apply only while no **Run** is in progress.
 - The **Transcript** marks when the agent first touches a file that becomes a **Change**, so the history shows where edits happened in the conversation.
 - **Undo** of a created file removes it. **Undo** of a deleted file writes the previous contents back. **Accept** keeps the creation or the deletion.
@@ -199,7 +212,13 @@ _Avoid_: engine, LLM
 > **Domain expert:** "No. The **Catalog** lists folders the **Desktop IDE** has opened, and directories added on this PC. A path that is neither is not listed."
 >
 > **Dev:** "I was chatting in the **Desktop IDE**. I open the phone."
-> **Domain expert:** "That **Desktop chat** is in the list. Open it from **Chats**, then send a **Follow-up**. A **Session** continues it on the phone. The **Desktop chat** on the PC does not get those new messages."
+> **Domain expert:** "That **Desktop chat** is in the list. Open it from **Chats**, then send a **Follow-up**. A **Session** continues it on the phone. The **Desktop chat** on the PC gets those new messages once the **Desktop IDE** is closed."
+>
+> **Dev:** "The agent in the **Desktop IDE** edited `notes.txt` and I left it pending. Later the phone's agent edits `notes.txt` again in the same conversation."
+> **Domain expert:** "It is one open **Change**. Its baseline is `notes.txt` from before the desktop edit, so **Undo** removes both edits. Keep it in the **Desktop IDE** and the phone stops showing it."
+>
+> **Dev:** "The **Desktop IDE** is open. I accept `api.ts` on the phone."
+> **Domain expert:** "The phone stops showing it. The **Desktop IDE** still shows it as open until you close it. If you undo it there first, that **Undo** counts, and the phone treats it as undone."
 >
 > **Dev:** "The agent is editing the wrong files and `npm test` is waiting. I hit Stop, like in the IDE."
 > **Domain expert:** "**Stop** ends the **Run**. The test never runs. The edits already written stay open **Changes**, and the **Transcript** stays. You can **Undo** those changes, then send a **Follow-up**."

@@ -7,6 +7,8 @@
   },
   "scripts": {
     "start": "node src/server.js",
+    "restart": "systemctl --user restart cursor-remote.service",
+    "live": "node scripts/live.js",
     "catalog": "node src/catalog-cli.js",
     "tailnet": "node scripts/tailnet.js",
     "test": "node --test"

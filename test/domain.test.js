@@ -6,11 +6,10 @@ import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { createCatalog } from "../src/catalog.js";
 import { displayText, normalizeFiles, promptBlocks } from "../src/files.js";
-import { continuationPrompt, listIdeChats, projectSlug } from "../src/ide-chats.js";
 import { ideProjectDirectories } from "../src/ide-projects.js";
-import { accept, currentText, remember, repairBaseline, undo } from "../src/changes.js";
-import { activityLabel, commandKey, isFileMutation, pathsFromTool, priorFromTool } from "../src/command-key.js";
-import { diffParts, unifiedDiff } from "../src/diff.js";
+import { currentText, remember, repairBaseline, restore } from "../src/changes.js";
+import { activityLabel, commandKey, isFileMutation, mutationAction, pathsFromTool, priorFromTool } from "../src/command-key.js";
+import { changeParts, diffParts, unifiedDiff } from "../src/diff.js";
 import { renderMarkdown } from "../src/markdown.js";
 
 test("catalog starts empty and only lists added directories", () => {
@@ -49,61 +48,6 @@ test("ide projects are the folders Cursor has opened", () => {
   assert.deepEqual(ideProjectDirectories(join(root, "missing.json")), []);
 });
 
-test("desktop chats are listed and continued without rewriting the IDE file", () => {
-  const root = mkdtempSync(join(tmpdir(), "ide-chats-"));
-  const workspace = join(root, "Cursor Remote");
-  mkdirSync(workspace);
-  const chatId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
-  const transcriptDir = join(root, projectSlug(workspace), "agent-transcripts", chatId);
-  mkdirSync(transcriptDir, { recursive: true });
-  writeFileSync(join(transcriptDir, `${chatId}.jsonl`), [
-    JSON.stringify({
-      role: "user",
-      message: { content: [{ type: "text", text: "<user_query>Fix the login bug</user_query>" }] },
-    }),
-    JSON.stringify({
-      role: "assistant",
-      message: { content: [{ type: "text", text: "I will inspect auth.ts." }, { type: "tool_use", name: "Read" }] },
-    }),
-    JSON.stringify({
-      role: "user",
-      message: {
-        content: [{
-          type: "text",
-          text: "<timestamp>Tue</timestamp>\n<user_query>Briefly inform the user about the task result and perform any follow-up actions (if needed). If there's no follow-ups needed, don't explicitly say that.</user_query>",
-        }],
-      },
-    }),
-    JSON.stringify({
-      role: "assistant",
-      message: { content: [{ type: "text", text: "The server restarted." }] },
-    }),
-    JSON.stringify({
-      role: "user",
-      message: { content: [{ type: "text", text: "<user_query>Also cover the refresh token</user_query>" }] },
-    }),
-  ].join("\n"));
-  const chats = listIdeChats(workspace, root);
-  assert.equal(chats.length, 1);
-  assert.equal(chats[0].title, "Fix the login bug");
-  assert.deepEqual(
-    chats[0].messages.map((message) => message.role),
-    ["user", "assistant", "user"],
-  );
-  assert.deepEqual(
-    chats[0].messages.map((message) => message.text),
-    ["Fix the login bug", "I will inspect auth.ts.", "Also cover the refresh token"],
-  );
-  assert.equal(
-    chats[0].messages.some((message) => /Briefly inform the user|server restarted/i.test(message.text)),
-    false,
-  );
-  const prompt = continuationPrompt(chats[0].messages, "Do that next.");
-  assert.match(prompt, /Fix the login bug/);
-  assert.match(prompt, /Do that next\.$/);
-  assert.equal(listIdeChats(workspace, join(root, "empty")).length, 0);
-});
-
 test("file attachments become image and resource prompt blocks", () => {
   const png = Buffer.from("89504e470d0a1a0a", "hex").toString("base64");
   const note = Buffer.from("hello notes", "utf8").toString("base64");
@@ -123,7 +67,15 @@ test("file attachments become image and resource prompt blocks", () => {
   assert.throws(() => normalizeFiles([{ name: "bad.bin", data: "!!!!" }]));
 });
 
-test("undo restores an edit, a created file, and a deleted file", () => {
+test("an empty file appearing or disappearing still counts as a change", () => {
+  assert.deepEqual(changeParts({ existed: false, content: null }, ""), [{ type: "hunk", lines: ["@@ new empty file @@"] }]);
+  assert.deepEqual(changeParts({ existed: true, content: "" }, null), [{ type: "hunk", lines: ["@@ deleted empty file @@"] }]);
+  assert.deepEqual(changeParts({ existed: true, content: "" }, ""), []);
+  assert.deepEqual(changeParts({ existed: false, content: null }, null), []);
+  assert.equal(changeParts({ existed: false, content: null }, "text").length, 1);
+});
+
+test("restore brings back a created file and a deleted file", () => {
   const root = mkdtempSync(join(tmpdir(), "changes-"));
   const edited = join(root, "edited.txt");
   const created = join(root, "created.txt");
@@ -138,13 +90,13 @@ test("undo restores an edit, a created file, and a deleted file", () => {
   writeFileSync(created, "new");
   writeFileSync(deleted, "");
   rmSync(deleted);
-  undo(changes, created);
-  undo(changes, deleted);
+  restore(created, changes[created]);
+  restore(deleted, changes[deleted]);
   assert.equal(currentText(created), null);
   assert.equal(currentText(deleted), "keep");
-  accept(changes, edited);
   assert.equal(currentText(edited), "agent");
-  assert.deepEqual(changes, {});
+  assert.equal(changes[edited].existed, true);
+  assert.equal(changes[edited].content, "mine");
 });
 
 test("allow for the session matches one exact command", () => {
@@ -218,6 +170,25 @@ test("diff parts keep surrounding lines behind expandable gaps", () => {
   assert.ok(parts[2].lines.length > 10);
 });
 
+test("deleting a file created in the same chat is a delete", () => {
+  const root = mkdtempSync(join(tmpdir(), "delete-label-"));
+  const file = join(root, "sample2.txt");
+  const named = { kind: "other", name: "delete_file", title: "Delete", rawInput: { path: file } };
+  assert.equal(isFileMutation(named), true);
+  assert.equal(mutationAction(named, { existed: false, content: null }), "delete");
+  const cleared = {
+    kind: "edit",
+    content: [{ type: "diff", path: file, oldText: "-- /dev/null", newText: "" }],
+  };
+  assert.equal(mutationAction(cleared, { existed: false, content: null }), "delete");
+  writeFileSync(file, "hello\n");
+  const created = {
+    kind: "edit",
+    content: [{ type: "diff", path: file, oldText: "-- /dev/null", newText: "hello\n" }],
+  };
+  assert.equal(mutationAction(created, { existed: false, content: null }), "create");
+});
+
 test("only mutating tools become file changes", () => {
   assert.equal(isFileMutation({ kind: "read", rawInput: { path: "a.js" } }), false);
   assert.equal(isFileMutation({ kind: "edit", rawInput: { path: "a.js" } }), true);
@@ -241,6 +212,16 @@ test("baseline prefers tool prior when disk already has the write", () => {
     content: [{ type: "diff", path: file, oldText: before, newText: after }],
   }, file);
   assert.equal(fromDiff, before);
+  const newFileFromDiffString = priorFromTool({
+    kind: "edit",
+    content: [{ type: "diff", path: file, oldText: "-- /dev/null", newText: `++ b/file.json\n${after}` }],
+  }, file);
+  assert.equal(newFileFromDiffString, null);
+  const excerptFromDiffString = priorFromTool({
+    kind: "edit",
+    content: [{ type: "diff", path: file, oldText: '-- a/file.json\n  "patterns": ["for each eligible friend you refer"]', newText: '++ b/file.json\n  "patterns": ["for each ... refer"]' }],
+  }, file);
+  assert.equal(excerptFromDiffString, undefined);
   const fromCursor = priorFromTool({
     kind: "edit",
     rawOutput: {

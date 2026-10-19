@@ -5,11 +5,11 @@ import { join } from "node:path";
 import * as acp from "@agentclientprotocol/sdk";
 import { readJson, writeJson } from "./json-file.js";
 import { createCatalog } from "./catalog.js";
-import { continuationPrompt, listIdeChats } from "./ide-chats.js";
+import { continuationPrompt, createDesktopChats } from "./desktop-chats/index.js";
 import { ideProjectDirectories } from "./ide-projects.js";
-import { accept, currentText, remember, repairBaseline, undo } from "./changes.js";
-import { activityLabel, commandKey, isFileMutation, mutationAction, pathsFromTool, priorFromTool } from "./command-key.js";
-import { diffParts, unifiedDiff } from "./diff.js";
+import { currentText, remember, repairBaseline, restore } from "./changes.js";
+import { activityLabel, commandKey, isDeletion, isFileMutation, mutationAction, pathsFromTool, priorFromTool } from "./command-key.js";
+import { changeParts } from "./diff.js";
 import { displayText, normalizeFiles, promptBlocks } from "./files.js";
 import { composePrompt, listSkills, skillBodies } from "./skills.js";
 
@@ -18,11 +18,11 @@ const MODES = ["agent", "plan", "ask"];
 export function createHub({ dataDir, agentBin, ideStorage }) {
   const catalog = createCatalog(join(dataDir, "catalog.json"));
   const storageFile = ideStorage ?? join(homedir(), ".config/Cursor/User/globalStorage/storage.json");
+  const desktop = createDesktopChats({ storeFile: join(homedir(), ".config/Cursor/User/globalStorage/state.vscdb") });
   const stateFile = join(dataDir, "state.json");
   const state = readJson(stateFile, { activeWorkspace: null, workspaces: {} });
   const listeners = new Set();
-  let running = false;
-  let loading = false;
+  let runningSession = null;
   let activity = null;
   let error = "";
   let connection = null;
@@ -30,12 +30,17 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
   let starting = null;
   let waiter = null;
   let saveTimer = null;
+  let lastPublished = "";
   const liveSessions = new Set();
 
   save();
 
-  function publish() {
+  function publish({ onlyIfChanged = false } = {}) {
+    if (onlyIfChanged && !listeners.size) return;
     const snapshot = view();
+    const serialized = JSON.stringify(snapshot);
+    if (onlyIfChanged && serialized === lastPublished) return;
+    lastPublished = serialized;
     for (const listener of listeners) listener(snapshot);
   }
 
@@ -69,7 +74,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
   }
 
   function requireIdle() {
-    if (running) throw new Error("A run is in progress.");
+    if (runningSession) throw new Error("A run is in progress.");
   }
 
   function guardCatalog() {
@@ -85,7 +90,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     }
     if (added) publish();
     if (!state.activeWorkspace || catalog.has(state.activeWorkspace)) return;
-    if (running) {
+    if (runningSession) {
       catalog.restore(state.activeWorkspace);
       error = "That workspace has a run in progress.";
     } else {
@@ -93,6 +98,69 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     }
     saveNow();
     publish();
+  }
+
+  function syncDesktop() {
+    let changed = followDesktopAnswers();
+    if (!desktop.ideRunning()) changed = writeDesktopChats() || changed;
+    if (changed) saveNow();
+    publish({ onlyIfChanged: true });
+  }
+
+  function followDesktopAnswers() {
+    let changed = false;
+    for (const [directory, workspace] of Object.entries(state.workspaces)) {
+      const rows = desktop.pendingRows(directory);
+      if (!rows) continue;
+      const pendingDiffIds = new Set(rows.map((row) => row.diffId));
+      for (const session of Object.values(workspace.sessions)) {
+        for (const [file, baseline] of Object.entries(session.changes)) {
+          if (!baseline.desktopDiffId || pendingDiffIds.has(baseline.desktopDiffId)) continue;
+          delete session.changes[file];
+          changed = true;
+        }
+      }
+    }
+    return changed;
+  }
+
+  function writeDesktopChats() {
+    const rowsToRemove = state.desktopRowsToRemove ?? [];
+    let changed = false;
+    for (const [directory, workspace] of Object.entries(state.workspaces)) {
+      for (const session of Object.values(workspace.sessions)) {
+        if (desktop.write(directory, session, { lastIsRunning: session === runningSession, rowsToRemove })) changed = true;
+      }
+    }
+    if (rowsToRemove.length && desktop.removeRows(rowsToRemove)) {
+      state.desktopRowsToRemove = [];
+      changed = true;
+    }
+    return changed;
+  }
+
+  function openConversation() {
+    const directory = state.activeWorkspace;
+    const workspace = directory ? state.workspaces[directory] : null;
+    if (!workspace) return {};
+    const open = shown(workspace, directory);
+    return { directory, workspace, ...open, chatId: open.session ? open.session.ideChatId : open.chat?.id ?? null };
+  }
+
+  function openChanges({ directory, session, chat, chatId }) {
+    if (!session && !chat) return [];
+    return desktop.changes({ directory, chatId, ownChanges: session?.changes, rowsToRemove: state.desktopRowsToRemove });
+  }
+
+  function queueRowKeys(rowKeys) {
+    if (!rowKeys.length) return;
+    state.desktopRowsToRemove = [...new Set([...(state.desktopRowsToRemove ?? []), ...rowKeys])];
+  }
+
+  function answerChange(session, change, action) {
+    if (action === "undo") restore(change.path, change.baseline);
+    if (session) delete session.changes[change.path];
+    queueRowKeys(change.rowKeys);
   }
 
   guardCatalog();
@@ -105,6 +173,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
       return () => listeners.delete(listener);
     },
     guardCatalog,
+    syncDesktop,
     selectWorkspace(directory) {
       requireIdle();
       if (!catalog.has(directory)) throw new Error("That directory is not in the catalog.");
@@ -130,9 +199,8 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
       await send(text, skillNames, false, null, files);
     },
     stop() {
-      const session = activeSession();
-      if (!running || !session || !connection) return;
-      connection.cancel({ sessionId: session.id }).catch(() => {});
+      if (!runningSession || !connection) return;
+      connection.cancel({ sessionId: runningSession.id }).catch(() => {});
       finishWait({ outcome: { outcome: "cancelled" } });
     },
     answerPermission(decision) {
@@ -207,7 +275,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
       if (!workspace) throw new Error("Choose a workspace first.");
       if (id.startsWith("ide:")) {
         const chatId = id.slice(4);
-        const chat = listIdeChats(state.activeWorkspace).find((item) => item.id === chatId);
+        const chat = desktop.list(state.activeWorkspace).find((item) => item.id === chatId);
         if (!chat) throw new Error("That chat is not in this workspace.");
         const linked = Object.values(workspace.sessions).find((session) => session.ideChatId === chatId);
         if (!linked) {
@@ -226,52 +294,46 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
       workspace.activeSessionId = session.id;
       saveNow();
       publish();
+      if (liveSessions.has(session.id)) return;
       await ensureAgent();
-      loading = true;
       try {
         await openLoaded(session, state.activeWorkspace);
         session.mode = session.modes?.currentModeId || session.mode;
         session.model = currentModelName(session.configOptions) || session.model;
       } finally {
-        loading = false;
         saveNow();
         publish();
       }
     },
     change(file, action) {
       requireIdle();
-      const session = activeSession();
-      if (!session) throw new Error("There is no session.");
-      applyChange(session, file, action);
+      const open = openConversation();
+      const change = openChanges(open).find((candidate) => candidate.path === file);
+      if (!change) throw new Error("That change is not open.");
+      answerChange(open.session, change, action);
       saveNow();
       publish();
     },
     changeAll(action) {
       requireIdle();
-      const session = activeSession();
-      if (!session) return;
-      for (const file of Object.keys(session.changes)) applyChange(session, file, action);
+      const open = openConversation();
+      for (const change of openChanges(open)) answerChange(open.session, change, action);
       saveNow();
       publish();
     },
   };
 
   function view() {
-    const directory = state.activeWorkspace;
-    const workspace = directory ? state.workspaces[directory] : null;
-    const open = workspace && directory ? shown(workspace, directory) : {};
+    const open = openConversation();
+    const { directory = state.activeWorkspace, workspace = null } = open;
     const session = open.session ?? null;
     if (session) ensureChangeMarks(session);
     const skills = listSkills(directory);
-    const transcript = open.chat
-      ? open.chat.messages
-      : session
-        ? [...ideMessages(directory, session.ideChatId), ...session.transcript]
-        : [];
+    const transcript = open.chat ? open.chat.messages : session ? desktop.transcript(session) : [];
     return {
       error,
-      running,
-      activity: running ? (waiter ? null : activity || "Working") : null,
+      running: Boolean(runningSession),
+      activity: runningSession ? (waiter ? null : activity || "Working") : null,
       catalog: catalog.list(),
       activeWorkspace: directory,
       activeSession: open.session
@@ -281,6 +343,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
           : null,
       sessions: workspace && directory ? sessionList(workspace, directory) : [],
       transcript,
+      desktopStatus: desktop.status({ directory, session, chatId: open.chatId, rowsToRemove: state.desktopRowsToRemove }),
       mode: session?.mode ?? workspace?.preferredMode ?? "agent",
       modes: MODES,
       model: session?.model ?? "Auto",
@@ -291,7 +354,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
         pinned: session?.pinned?.includes(name) ?? false,
       })),
       pending: waiter?.view ?? null,
-      changes: session ? changeViews(session) : [],
+      changes: changeViews(open),
     };
   }
 
@@ -299,7 +362,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     const linked = new Set(
       Object.values(workspace.sessions).map((session) => session.ideChatId).filter(Boolean),
     );
-    const ide = listIdeChats(directory)
+    const ide = desktop.list(directory)
       .filter((chat) => !linked.has(chat.id))
       .map((chat) => ({ id: `ide:${chat.id}`, title: chat.title, updatedAt: chat.updatedAt }));
     const own = Object.values(workspace.sessions).map((session) => ({
@@ -316,23 +379,18 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     const session = workspace.activeSessionId ? workspace.sessions[workspace.activeSessionId] : null;
     if (session) return { session };
     if (!workspace.activeIdeChatId) return {};
-    const chat = listIdeChats(directory).find((item) => item.id === workspace.activeIdeChatId);
-    if (!chat) return {};
-    const linked = Object.values(workspace.sessions).find((item) => item.ideChatId === chat.id);
+    const linked = Object.values(workspace.sessions).find((item) => item.ideChatId === workspace.activeIdeChatId);
     if (linked) return { session: linked };
-    return { chat };
+    const chat = desktop.list(directory).some((item) => item.id === workspace.activeIdeChatId)
+      ? desktop.read(workspace.activeIdeChatId)
+      : null;
+    return chat ? { chat } : {};
   }
 
-  function ideMessages(directory, chatId) {
-    if (!directory || !chatId) return [];
-    return listIdeChats(directory).find((chat) => chat.id === chatId)?.messages ?? [];
-  }
-
-  function changeViews(session) {
-    return Object.entries(session.changes).flatMap(([file, baseline]) => {
-      const parts = diffParts(baseline.content, currentText(file));
-      if (!parts.length) return [];
-      return [{ path: file, parts }];
+  function changeViews(open) {
+    return openChanges(open).flatMap(({ path, baseline }) => {
+      const parts = changeParts(baseline, currentText(path));
+      return parts.length ? [{ path, parts }] : [];
     });
   }
 
@@ -343,7 +401,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     let added = false;
     for (const [file, baseline] of Object.entries(session.changes)) {
       if (marked.has(file)) continue;
-      if (!unifiedDiff(baseline.content, currentText(file), file)) continue;
+      if (!changeParts(baseline, currentText(file)).length) continue;
       session.transcript.push({
         role: "change",
         path: file,
@@ -397,7 +455,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     const blocks = promptBlocks(textPrompt, attached);
     append(session, "user", displayText(message, attached));
     session.updatedAt = Date.now();
-    running = true;
+    runningSession = session;
     activity = "Thinking";
     error = "";
     saveNow();
@@ -410,7 +468,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
       sessionId: session.id,
       prompt: blocks,
     }).catch(showError).finally(() => {
-      running = false;
+      runningSession = null;
       activity = null;
       finishWait({ outcome: { outcome: "cancelled" } });
       saveNow();
@@ -418,19 +476,14 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
   }
 
   async function openLoaded(session, directory) {
-    loading = true;
-    try {
-      const loaded = await connection.loadSession({
-        sessionId: session.id,
-        cwd: directory,
-        mcpServers: [],
-      });
-      session.modes = loaded.modes ?? session.modes;
-      session.configOptions = loaded.configOptions ?? session.configOptions;
-      liveSessions.add(session.id);
-    } finally {
-      loading = false;
-    }
+    const loaded = await connection.loadSession({
+      sessionId: session.id,
+      cwd: directory,
+      mcpServers: [],
+    });
+    session.modes = loaded.modes ?? session.modes;
+    session.configOptions = loaded.configOptions ?? session.configOptions;
+    liveSessions.add(session.id);
   }
 
   async function ensureAgent() {
@@ -473,7 +526,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     agentProcess.on("exit", () => {
       connection = null;
       starting = null;
-      running = false;
+      runningSession = null;
       activity = null;
       liveSessions.clear();
       finishWait({ outcome: { outcome: "cancelled" } });
@@ -512,23 +565,22 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     const session = findSession(params.sessionId);
     if (!session) return;
     const update = params.update;
-    if (update.sessionUpdate === "agent_message_chunk" && !loading) {
+    const answering = session === runningSession;
+    if (update.sessionUpdate === "agent_message_chunk" && answering) {
       const text = update.content?.type === "text" ? update.content.text : "";
       if (text) {
         append(session, "assistant", text);
-        if (running) activity = "Writing";
+        activity = "Writing";
       }
     }
-    if (update.sessionUpdate === "agent_thought_chunk" && running) {
+    if (update.sessionUpdate === "agent_thought_chunk" && answering) {
       activity = "Thinking";
     }
     if (update.sessionUpdate === "user_message_chunk") return;
-    if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
-      if (!loading) trackMutations(session, update);
-      if (running) {
-        const done = update.status === "completed" || update.status === "failed" || update.status === "cancelled";
-        activity = done ? "Thinking" : activityLabel(update);
-      }
+    if ((update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") && answering) {
+      trackMutations(session, update);
+      const done = update.status === "completed" || update.status === "failed" || update.status === "cancelled";
+      activity = done ? "Thinking" : activityLabel(update);
     }
     if (update.sessionUpdate === "current_mode_update" && update.modeId) {
       session.mode = String(update.modeId);
@@ -545,6 +597,10 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     if (!isFileMutation(tool)) return;
     for (const file of pathsFromTool(tool)) {
       const prior = priorFromTool(tool, file);
+      if (isDeletion(tool, file)) {
+        noteDeletion(session, file, prior);
+        continue;
+      }
       if (Object.hasOwn(session.changes, file)) {
         repairBaseline(session.changes, file, prior);
         continue;
@@ -556,6 +612,30 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
         action: mutationAction(tool, session.changes[file]),
       });
     }
+  }
+
+  function noteDeletion(session, file, prior) {
+    const existing = session.changes[file];
+    const latest = [...session.transcript].reverse().find((message) => message.role === "change" && message.path === file);
+    const removed = typeof prior === "string" ? prior : existing?.existed ? existing.content : currentText(file);
+    if (latest?.action !== "delete") {
+      if (existing?.desktopDiffId) queueRemovedRow(existing.desktopDiffId);
+      session.transcript.push({ role: "change", path: file, action: "delete" });
+    }
+    const alreadyWritten = latest?.action === "delete" && existing?.desktopBubbleId;
+    session.changes[file] = {
+      existed: true,
+      content: removed ?? "",
+      touchedAt: existing?.touchedAt ?? Date.now(),
+      ...(alreadyWritten ? { desktopBubbleId: existing.desktopBubbleId, desktopDiffId: existing.desktopDiffId } : {}),
+    };
+  }
+
+  function queueRemovedRow(diffId) {
+    const directory = state.activeWorkspace;
+    if (!directory) return;
+    const row = (desktop.pendingRows(directory) ?? []).find((candidate) => candidate.diffId === diffId);
+    if (row) queueRowKeys([row.rowKey]);
   }
 
   function extMethod(method, params) {
@@ -645,11 +725,6 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     error = cause instanceof Error ? cause.message : String(cause);
     publish();
   }
-}
-
-function applyChange(session, file, action) {
-  if (action === "undo") undo(session.changes, file);
-  else accept(session.changes, file);
 }
 
 function optionFor(options, kind) {
