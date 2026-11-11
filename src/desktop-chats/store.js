@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -57,8 +57,53 @@ export function recordKey(chatId) {
   return `composerData:${chatId}`;
 }
 
+export function headersChunkKey(chatId, index) {
+  return `composerConvHeaders:${chatId}:${String(index).padStart(6, "0")}`;
+}
+
 export function bubbleKey(chatId, bubbleId) {
   return `bubbleId:${chatId}:${bubbleId}`;
+}
+
+/** Cursor keeps short chats inline; longer ones move headers into composerConvHeaders chunks. */
+export function readConversationHeaders(database, chatId, record) {
+  const inline = record?.fullConversationHeadersOnly;
+  if (!Array.isArray(inline)) return null;
+  const log = record.headerLog;
+  if (!log || inline.length > 0) return inline;
+  const chunkCount = Number(log.chunkCount) || 0;
+  const headers = [];
+  for (let index = 0; index < chunkCount; index += 1) {
+    const chunk = parseJson(readValue(database, headersChunkKey(chatId, index)));
+    if (!Array.isArray(chunk)) return null;
+    headers.push(...chunk);
+  }
+  return headers;
+}
+
+export function writeConversationHeaders(database, chatId, record, headers) {
+  const previous = record.headerLog;
+  if (!previous) {
+    record.fullConversationHeadersOnly = headers;
+    return;
+  }
+  const chunkSize = Number(previous.chunkSize) || 256;
+  const previousCount = Number(previous.chunkCount) || 0;
+  record.fullConversationHeadersOnly = [];
+  let chunkCount = 0;
+  for (let start = 0; start < headers.length; start += chunkSize) {
+    writeValue(database, headersChunkKey(chatId, chunkCount), JSON.stringify(headers.slice(start, start + chunkSize)));
+    chunkCount += 1;
+  }
+  for (let index = chunkCount; index < previousCount; index += 1) {
+    deleteValues(database, [headersChunkKey(chatId, index)]);
+  }
+  record.headerLog = {
+    chunkSize,
+    chunkCount,
+    count: headers.length,
+    generation: randomUUID(),
+  };
 }
 
 export function readBubble(database, chatId, bubbleId) {
@@ -80,8 +125,8 @@ function fileToolAction(header) {
 
 export function readChat(database, chatId) {
   const record = readRecord(database, chatId);
-  if (!Array.isArray(record?.fullConversationHeadersOnly)) return null;
-  const headers = record.fullConversationHeadersOnly;
+  const headers = readConversationHeaders(database, chatId, record);
+  if (!headers) return null;
   const createdFiles = new Set(Object.entries(record.originalFileStates ?? {})
     .filter(([, state]) => state?.isNewlyCreated)
     .map(([uri]) => uri));

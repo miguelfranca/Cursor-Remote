@@ -120,6 +120,28 @@ test("desktop chats are read from the IDE store without thinking, tool steps, or
   assert.match(prompt, /Do that next\.$/);
 });
 
+test("desktop chats whose headers Cursor moved into composerConvHeaders chunks still show messages", () => {
+  const { workspace, storeFile, desktop, authFile } = seededStore();
+  const database = new DatabaseSync(storeFile);
+  const key = `composerData:${templateChatId}`;
+  const record = JSON.parse(database.prepare("select value from cursorDiskKV where key = ?").get(key).value);
+  const headers = record.fullConversationHeadersOnly;
+  record.fullConversationHeadersOnly = [];
+  record.headerLog = { chunkSize: 256, chunkCount: 1, count: headers.length, generation: "gen-1" };
+  database.prepare("insert or replace into cursorDiskKV(key, value) values (?, ?)").run(key, JSON.stringify(record));
+  database.prepare("insert or replace into cursorDiskKV(key, value) values (?, ?)").run(
+    `composerConvHeaders:${templateChatId}:000000`,
+    JSON.stringify(headers),
+  );
+  database.close();
+  assert.deepEqual(desktop.read(templateChatId).messages, [
+    { bubbleId: "user-1", role: "user", text: "Fix the login bug" },
+    { bubbleId: "edit-1", role: "change", path: authFile, action: "edit" },
+    { bubbleId: "reply-1", role: "assistant", text: "I will inspect auth.ts." },
+  ]);
+  assert.equal(desktop.list(workspace)[0].id, templateChatId);
+});
+
 test("desktop pending edits show as changes, and the earliest baseline wins", () => {
   const { workspace, desktop, authFile } = seededStore();
   const [desktopChange] = desktop.changes({ directory: workspace, chatId: templateChatId });
@@ -252,6 +274,66 @@ test("a phone change is written into the desktop chat as an edit with a pending 
 
   assert.deepEqual(desktop.transcript(session).slice(3), session.transcript);
   assert.equal(desktop.write(workspace, session), false);
+});
+
+test("a new phone chat keeps its messages when Cursor stores the template's message list in chunks", () => {
+  const { workspace, storeFile, desktop } = seededStore();
+  const database = new DatabaseSync(storeFile);
+  const key = `composerData:${templateChatId}`;
+  const record = JSON.parse(database.prepare("select value from cursorDiskKV where key = ?").get(key).value);
+  const headers = record.fullConversationHeadersOnly;
+  record.fullConversationHeadersOnly = [];
+  record.headerLog = { chunkSize: 256, chunkCount: 1, count: headers.length, generation: "template-gen" };
+  database.prepare("insert or replace into cursorDiskKV(key, value) values (?, ?)").run(key, JSON.stringify(record));
+  database.prepare("insert or replace into cursorDiskKV(key, value) values (?, ?)").run(
+    `composerConvHeaders:${templateChatId}:000000`,
+    JSON.stringify(headers),
+  );
+  database.close();
+
+  const session = phoneSession({
+    transcript: [
+      { role: "user", text: "Where was the outage?" },
+      { role: "assistant", text: "Between 4 and 7." },
+    ],
+  });
+  assert.equal(desktop.write(workspace, session), true);
+  assert.deepEqual(
+    desktop.read(session.ideChatId).messages.map(({ role, text }) => ({ role, text })),
+    [{ role: "user", text: "Where was the outage?" }, { role: "assistant", text: "Between 4 and 7." }],
+  );
+  const created = JSON.parse(readValue(storeFile, `composerData:${session.ideChatId}`));
+  assert.equal(created.fullConversationHeadersOnly.length, 0);
+  assert.equal(created.headerLog.count, 2);
+  assert.notEqual(created.headerLog.generation, "template-gen");
+  assert.equal(JSON.parse(readValue(storeFile, `composerConvHeaders:${session.ideChatId}:000000`)).length, 2);
+});
+
+test("a wiped desktop header list is shown from the phone session and restored on the next write", () => {
+  const { workspace, storeFile, desktop } = seededStore();
+  const session = phoneSession({
+    transcript: [
+      { role: "user", text: "Where was the outage?" },
+      { role: "assistant", text: "Between 4 and 7." },
+    ],
+  });
+  assert.equal(desktop.write(workspace, session), true);
+  const database = new DatabaseSync(storeFile);
+  const key = `composerData:${session.ideChatId}`;
+  const record = JSON.parse(database.prepare("select value from cursorDiskKV where key = ?").get(key).value);
+  record.fullConversationHeadersOnly = [];
+  record.headerLog = { chunkSize: 256, chunkCount: 0, count: 0, generation: "wiped" };
+  database.prepare("insert or replace into cursorDiskKV(key, value) values (?, ?)").run(key, JSON.stringify(record));
+  database.prepare("update composerHeaders set lastUpdatedAt = ? where composerId = ?").run(9000, session.ideChatId);
+  database.close();
+
+  assert.deepEqual(desktop.read(session.ideChatId).messages, []);
+  assert.deepEqual(desktop.transcript(session), session.transcript);
+  assert.equal(desktop.write(workspace, session), true);
+  assert.deepEqual(
+    desktop.read(session.ideChatId).messages.map(({ role, text }) => ({ role, text })),
+    [{ role: "user", text: "Where was the outage?" }, { role: "assistant", text: "Between 4 and 7." }],
+  );
 });
 
 test("a phone session becomes a desktop chat once its exchanges finish", () => {

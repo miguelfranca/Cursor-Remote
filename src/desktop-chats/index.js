@@ -13,7 +13,7 @@ import {
   parseJson,
   readChat,
 } from "./store.js";
-import { RefusedWrite, repairPendingBaselines, writeExchanges } from "./writer.js";
+import { RefusedWrite, repairPendingBaselines, restoreEmptyHeaderList, writeExchanges } from "./writer.js";
 
 export { continuationPrompt } from "./continuation.js";
 
@@ -85,7 +85,10 @@ export function createDesktopChats({
 
   function transcript(session) {
     const chat = read(session.ideChatId);
-    return chat ? linkedTranscript(chat.messages, session) : session.transcript;
+    if (!chat) return session.transcript;
+    const wroteBubbles = Object.keys(session.desktopBubbles ?? {}).length > 0;
+    if (!chat.messages.length && wroteBubbles && session.transcript.length) return session.transcript;
+    return linkedTranscript(chat.messages, session);
   }
 
   function status({ directory, session, chatId, rowsToRemove = [] }) {
@@ -145,15 +148,19 @@ export function createDesktopChats({
       : [];
     const fileChanges = unwrittenFileChanges(session, exchanges, open);
     const repairs = baselineRepairs(directory, open, fileChanges);
-    if (!exchanges.length && !(session.ideChatId && fileChanges.length) && !repairs.length) return false;
+    const bubbleIds = Object.keys(session.desktopBubbles ?? {});
+    const mayRestore = Boolean(session.ideChatId && bubbleIds.length && read(session.ideChatId)?.messages.length === 0);
+    if (!exchanges.length && !(session.ideChatId && fileChanges.length) && !repairs.length && !mayRestore) return false;
     try {
       const written = withWriter((database) => {
         const result = exchanges.length || fileChanges.length
           ? writeExchanges(database, { chatId: session.ideChatId, directory, session, exchanges, fileChanges })
           : { chatId: session.ideChatId, bubbles: {}, fileChanges: {} };
         repairPendingBaselines(database, repairs);
-        return result;
+        const restored = mayRestore && restoreEmptyHeaderList(database, { chatId: result.chatId, bubbleIds });
+        return { ...result, restored };
       });
+      if (!exchanges.length && !fileChanges.length && !repairs.length && !written.restored) return false;
       session.ideChatId = written.chatId;
       session.desktopBubbles = { ...session.desktopBubbles, ...written.bubbles };
       if (exchanges.length) session.desktopWritten = exchanges.at(-1).end;

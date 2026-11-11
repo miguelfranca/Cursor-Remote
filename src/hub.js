@@ -24,6 +24,16 @@ export function queueAfterRun(run) {
   return "keep";
 }
 
+export function agentFailure(cause) {
+  const details = typeof cause?.data?.details === "string" ? cause.data.details : "";
+  const message = cause instanceof Error ? cause.message : String(cause ?? "");
+  if (/unauthenticated/i.test(details) || /unauthenticated/i.test(message)) {
+    return new Error("The agent on this PC is not logged in. Run agent login in a terminal, then send the message again.");
+  }
+  if (details && message === "Internal error") return new Error(details);
+  return cause instanceof Error ? cause : new Error(message || "Request failed.");
+}
+
 export function createHub({ dataDir, agentBin, ideStorage }) {
   const catalog = createCatalog(join(dataDir, "catalog.json"));
   const storageFile = ideStorage ?? join(homedir(), ".config/Cursor/User/globalStorage/storage.json");
@@ -40,6 +50,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
   let saveTimer = null;
   let lastPublished = "";
   const liveSessions = new Set();
+  let agentReady = false;
 
   save();
 
@@ -665,20 +676,37 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
   }
 
   async function ensureAgent() {
-    if (connection) return;
+    if (agentReady && connection) return;
     if (!starting) starting = startAgent();
-    await starting;
+    try {
+      await starting;
+    } catch (cause) {
+      const failure = agentFailure(cause);
+      const child = agentProcess;
+      starting = null;
+      connection = null;
+      agentReady = false;
+      if (child) {
+        agentProcess = null;
+        if (child.exitCode == null) child.kill();
+      }
+      error = failure.message;
+      publish();
+      throw failure;
+    }
   }
 
   function startAgent() {
     const bin = agentBin || join(homedir(), ".local", "bin", "agent");
-    agentProcess = spawn(bin, ["acp"], { stdio: ["pipe", "pipe", "pipe"] });
-    agentProcess.stderr.on("data", (chunk) => {
+    const child = spawn(bin, ["acp"], { stdio: ["pipe", "pipe", "pipe"] });
+    agentProcess = child;
+    agentReady = false;
+    child.stderr.on("data", (chunk) => {
       process.stderr.write(chunk);
     });
     const stream = acp.ndJsonStream(
-      Writable.toWeb(agentProcess.stdin),
-      Readable.toWeb(agentProcess.stdout),
+      Writable.toWeb(child.stdin),
+      Readable.toWeb(child.stdout),
     );
     const client = {
       requestPermission,
@@ -701,9 +729,13 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
       },
     };
     connection = new acp.ClientSideConnection(() => client, stream);
-    agentProcess.on("exit", () => {
+    child.on("exit", () => {
+      if (agentProcess !== child) return;
+      const wasReady = agentReady;
       connection = null;
       starting = null;
+      agentReady = false;
+      if (!wasReady) return;
       for (const run of runs.values()) {
         run.stopped = true;
         run.failed = true;
@@ -725,6 +757,7 @@ export function createHub({ dataDir, agentBin, ideStorage }) {
     }).then(async (initialized) => {
       const method = initialized.authMethods?.find((item) => item.id === "cursor_login");
       if (method) await connection.authenticate({ methodId: method.id });
+      agentReady = true;
     });
   }
 

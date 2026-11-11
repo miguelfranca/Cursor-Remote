@@ -10,8 +10,14 @@ import { ideProjectDirectories } from "../src/ide-projects.js";
 import { currentText, remember, repairBaseline, restore } from "../src/changes.js";
 import { activityLabel, commandKey, isFileMutation, mutationAction, pathsFromTool, priorFromTool } from "../src/command-key.js";
 import { changeParts, diffParts, unifiedDiff } from "../src/diff.js";
-import { queueAfterRun } from "../src/hub.js";
+import { agentFailure, queueAfterRun } from "../src/hub.js";
 import { renderMarkdown } from "../src/markdown.js";
+
+test("an unauthenticated agent tells the operator to log in", () => {
+  const failure = agentFailure({ message: "Internal error", data: { details: "[unauthenticated] Error" } });
+  assert.match(failure.message, /agent login/);
+  assert.equal(agentFailure(new Error("The workspace is missing.")).message, "The workspace is missing.");
+});
 
 test("a finished turn sends the next queued follow-up, and stop or an error does not", () => {
   assert.equal(queueAfterRun({ stopReason: "end_turn" }), "send-next");

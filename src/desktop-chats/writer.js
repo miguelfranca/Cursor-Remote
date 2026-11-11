@@ -19,9 +19,11 @@ import {
   putBlob,
   readBlob,
   readBubble,
+  readConversationHeaders,
   readRecord,
   readValue,
   recordKey,
+  writeConversationHeaders,
   writeValue,
 } from "./store.js";
 
@@ -57,6 +59,60 @@ export function repairPendingBaselines(database, repairs) {
   for (const repair of repairs) replacePendingLines(database, repair.rowKey, repair.originalTextLines);
 }
 
+export function restoreEmptyHeaderList(database, { chatId, bubbleIds }) {
+  const record = readRecord(database, chatId);
+  const headers = record?._v === RECORD_VERSION ? readConversationHeaders(database, chatId, record) : null;
+  if (!headers || headers.length > 0) return false;
+  const restored = bubbleIds.flatMap((bubbleId) => {
+    const bubble = readBubble(database, chatId, bubbleId);
+    if (!isTypedUserMessage(bubble) && !isAssistantText(bubble)) return [];
+    const time = Date.parse(bubble.createdAt) || Number(bubble.startedAtMs) || Date.now();
+    return [{
+      bubbleId,
+      type: bubble.type,
+      grouping: bubble.type === ASSISTANT_BUBBLE
+        ? {
+          isRenderable: true,
+          hasText: true,
+          isShortPlainText: true,
+          isKeptFinalAiVisibleOutsideWorkedForGroup: true,
+          toolDisplayComputed: true,
+        }
+        : { isRenderable: true, hasText: true, isShortPlainText: true, toolDisplayComputed: true },
+      createdAt: bubble.createdAt || new Date(time).toISOString(),
+      startedAtMs: time,
+      completedAtMs: Number(bubble.completedAtMs) || time,
+    }];
+  });
+  if (!restored.length) return false;
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    storeHeaders(database, chatId, record, restored, record.headerLog);
+    writeValue(database, recordKey(chatId), JSON.stringify(record));
+    database.exec("COMMIT");
+    return true;
+  } catch (cause) {
+    database.exec("ROLLBACK");
+    throw cause;
+  }
+}
+
+function storeHeaders(database, chatId, record, headers, templateLog) {
+  if (!templateLog) {
+    record.fullConversationHeadersOnly = headers;
+    delete record.headerLog;
+    return;
+  }
+  record.headerLog = {
+    chunkSize: Number(templateLog.chunkSize) || 256,
+    chunkCount: 0,
+    count: 0,
+    generation: randomUUID(),
+  };
+  record.fullConversationHeadersOnly = [];
+  writeConversationHeaders(database, chatId, record, headers);
+}
+
 export function writeExchanges(database, { chatId, directory, session, exchanges, fileChanges = [] }) {
   database.exec("BEGIN IMMEDIATE");
   try {
@@ -76,7 +132,7 @@ function appendToChat(database, { chatId, directory, session, exchanges, fileCha
   const record = readRecord(database, chatId);
   const headerRow = chatHeaderRow(database, chatId);
   if (!record || !headerRow) throw new RefusedWrite("The desktop chat is no longer in Cursor.");
-  const state = readableState(record);
+  const state = readableState(database, chatId, record);
   const sources = bubbleSources(database, chatId, record) ?? findTemplate(database, directory).sources;
   const time = Math.max(Number(record.lastUpdatedAt) || 0, session.updatedAt || Date.now());
   record.originalFileStates ??= {};
@@ -97,7 +153,9 @@ function appendToChat(database, { chatId, directory, session, exchanges, fileCha
     ...appended.turns,
     ...appended.recentUserMessages,
   ]));
-  record.fullConversationHeadersOnly = [...record.fullConversationHeadersOnly, ...appended.headers];
+  const headers = readConversationHeaders(database, chatId, record);
+  if (!headers) throw new RefusedWrite("The desktop chat has no message list in the tested format.");
+  writeConversationHeaders(database, chatId, record, [...headers, ...appended.headers]);
   stampUpdated(record, time);
   record.status = "completed";
   writeValue(database, recordKey(chatId), JSON.stringify(record));
@@ -170,6 +228,7 @@ function createChat(database, { directory, session, exchanges, fileChanges }) {
     modelConfig: desktopModelConfig(session),
   };
   stampUpdated(record, time);
+  storeHeaders(database, chatId, record, appended.headers, template.record.headerLog);
   writeValue(database, recordKey(chatId), JSON.stringify(record));
   const headerValue = {
     ...template.headerValue,
@@ -372,9 +431,11 @@ function workspaceIdOf(directory) {
   }
 }
 
-function readableState(record) {
+function readableState(database, chatId, record) {
   if (record._v !== RECORD_VERSION) throw new RefusedWrite(`The desktop chat has record version ${record._v}, expected ${RECORD_VERSION}.`);
-  if (!Array.isArray(record.fullConversationHeadersOnly)) throw new RefusedWrite("The desktop chat has no message list in the tested format.");
+  if (!readConversationHeaders(database, chatId, record)) {
+    throw new RefusedWrite("The desktop chat has no message list in the tested format.");
+  }
   try {
     return decodeState(record.conversationState);
   } catch (cause) {
@@ -383,10 +444,12 @@ function readableState(record) {
 }
 
 function bubbleSources(database, chatId, record) {
-  const headers = [...record.fullConversationHeadersOnly].reverse();
-  const user = latestBubble(database, chatId, headers, (header) =>
+  const headers = readConversationHeaders(database, chatId, record);
+  if (!headers?.length) return null;
+  const newestFirst = [...headers].reverse();
+  const user = latestBubble(database, chatId, newestFirst, (header) =>
     header.type === USER_BUBBLE && !header.grouping?.isSimulatedMsg, isTypedUserMessage);
-  const assistant = user && latestBubble(database, chatId, headers, (header) =>
+  const assistant = user && latestBubble(database, chatId, newestFirst, (header) =>
     header.type === ASSISTANT_BUBBLE && !header.grouping?.capabilityType, isAssistantText);
   return assistant ? { user, assistant } : null;
 }
@@ -408,7 +471,7 @@ function findTemplate(database, directory) {
   ).all(workspaceId, TEMPLATE_CANDIDATES);
   for (const candidate of candidates) {
     const record = readRecord(database, candidate.composerId);
-    if (record?._v !== RECORD_VERSION || !Array.isArray(record.fullConversationHeadersOnly)) continue;
+    if (record?._v !== RECORD_VERSION || !readConversationHeaders(database, candidate.composerId, record)?.length) continue;
     const systemPrompt = systemPromptOf(database, record);
     const sources = systemPrompt && bubbleSources(database, candidate.composerId, record);
     if (sources) return { record, headerValue: parseJson(candidate.value) ?? {}, systemPrompt, sources };

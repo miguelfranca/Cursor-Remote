@@ -1119,7 +1119,18 @@ function browserClient() {
     return "";
   }
 
+  function nearBottom(box) {
+    return box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+  }
+
   function render(next) {
+    const box = $("transcript");
+    const chatChanged =
+      !state ||
+      state.activeSession !== next.activeSession ||
+      state.activeWorkspace !== next.activeWorkspace;
+    const stickToBottom = chatChanged || nearBottom(box);
+    const savedScroll = box.scrollTop;
     state = next;
     const openRunning = Boolean(next.running);
     const showRun = openRunning && !composingNew;
@@ -1292,8 +1303,8 @@ function browserClient() {
       if (nextDiff) nextDiff.scrollTop = changeDiffScroll;
     }
 
-    const box = $("transcript");
-    box.scrollTop = box.scrollHeight;
+    if (stickToBottom) box.scrollTop = box.scrollHeight;
+    else box.scrollTop = savedScroll;
     growText();
   }
 
